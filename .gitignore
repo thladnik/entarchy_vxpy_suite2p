@@ -40,3 +40,7 @@ nosetests.xml
 coverage.xml
 *.cover
 *.log
+
+# Safety
+secret.txt
+dev_test/
