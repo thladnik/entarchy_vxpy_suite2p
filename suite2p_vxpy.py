@@ -1,4 +1,4 @@
-from cmath import phase
+import sys
 
 import numpy as np
 import tqdm
@@ -55,7 +55,7 @@ class Suite2PVxPy(Entarchy):
                     animal[k] = v
                 self.add_new_entity(animal)
 
-                for j in tqdm.tqdm(range(7), desc='Recordings', position=1):
+                for j in tqdm.tqdm(range(7), desc='Recordings', position=1, leave=False):
                     recording = Recording(self, _id=f'Recording_{j}', _parent=animal)
                     self.add_new_entity(recording)
 
@@ -70,11 +70,11 @@ class Suite2PVxPy(Entarchy):
                     for jj in range(5):
                         recording[f'param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
 
-                    for p in tqdm.tqdm(range(300), desc='Phases', position=2):
+                    for p in tqdm.tqdm(range(300), desc='Phases', position=2, leave=False):
                         phase = Phase(self, _id=f'Phase_{p}', _parent=recording)
                         self.add_new_entity(phase)
 
-                    for r in tqdm.tqdm(range(random.randint(400, 800)), desc='Rois', position=2):
+                    for r in tqdm.tqdm(range(random.randint(400, 800)), desc='Rois', position=2, leave=False):
                         roi = Roi(self, _id=f'Roi_{r}', _parent=recording)
                         self.add_new_entity(roi)
 
@@ -88,9 +88,13 @@ class Suite2PVxPy(Entarchy):
                             roi[f'param_array_{jj}'] = np.random.rand(random.randint(10, 100))
                         for jj in range(5):
                             roi[f'param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
+                        # Commit after each ROI
+                        self.commit()
 
                     # Commit after each recording
                     self.commit()
+                # Commit after each animal
+                self.commit()
 
 
 if __name__ == '__main__':
@@ -101,6 +105,8 @@ if __name__ == '__main__':
     # thladnik
 
     recreate = False
+    if 'recreate' in sys.argv:
+        recreate = True
 
     # Recreate entarchy
     if recreate:
@@ -122,8 +128,13 @@ if __name__ == '__main__':
         ente = Suite2PVxPy.create('./dev_test/path/', _backend)
         ente.digest('')
 
-    ente = Suite2PVxPy('./dev_test/path/', debug=True)
+    ente = Suite2PVxPy('./dev_test/path/', debug=False)
 
     recs = ente.get(Recording, 'param_int_1 > 10')
+
+    rois = ente.get(Roi)
+    rois1 = ente.get(Roi, 'param_int_1 >= 200')
+    rois2 = ente.get(Roi, 'param_int_1 <= 800')
+    rois3 = ente.get(Roi, 'param_int_1 >= 950')
 
     print('')
