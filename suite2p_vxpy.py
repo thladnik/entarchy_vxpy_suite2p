@@ -36,7 +36,7 @@ Recording.add_child_entity_type(Phase)
 
 class Suite2PVxPy(Entarchy):
 
-    _implementation_version = '0.2'
+    implementation_version = '0.2'
 
     _hierarchy_root = Animal
 
@@ -47,7 +47,6 @@ class Suite2PVxPy(Entarchy):
         # Use in context to control commits
         #  and speed up adding multiple entities and their attributes
         with self:
-            R = 0
 
             # for i in tqdm.tqdm(range(3), desc='Animals', position=0):
             for i in range(3):
@@ -91,7 +90,7 @@ class Suite2PVxPy(Entarchy):
                         self.add_new_entity(roi)
 
                         for jj in range(5):
-                            roi[f'param_int_{jj}'] = random.randint(1, 999)
+                            roi[f'param_int_{jj}'] = random.randint(0, 1000)
                         for jj in range(5):
                             roi[f'param_float_{jj}'] = random.randint(0, 10000) / 10
                         for jj in range(5):
@@ -103,7 +102,6 @@ class Suite2PVxPy(Entarchy):
 
                     # Commit after each recording
                     self.commit()
-
 
 
 if __name__ == '__main__':
