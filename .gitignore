@@ -42,5 +42,6 @@ coverage.xml
 *.log
 
 # Safety
-secret.txt
+secret_home.txt
+secret_cin.txt
 dev_test/

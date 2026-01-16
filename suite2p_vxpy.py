@@ -1,7 +1,6 @@
 import sys
 
 import numpy as np
-import tqdm
 
 from entarchy import Entarchy, Entity, Collection
 
@@ -10,21 +9,41 @@ __all__ = ['Animal', 'Recording', 'Roi', 'Phase', 'Suite2PVxPy']
 from entarchy.backend import MySQLBackend
 
 
+class AnimalCollection(Collection):
+    pass
+
+
+class RecordingCollection(Collection):
+    pass
+
+
+class RoiCollection(Collection):
+    pass
+
+
+class PhaseCollection(Collection):
+    pass
+
+
 class Animal(Entity):
+    _collection_cls = AnimalCollection
     pass
 
 
 class Recording(Entity):
+    _collection_cls = RecordingCollection
     # # Child entity types may be added by name meta // Does not work yet
     # _child_entity_types = ['Roi', 'Phase']
     pass
 
 
 class Roi(Entity):
+    _collection_cls = RoiCollection
     pass
 
 
 class Phase(Entity):
+    _collection_cls = PhaseCollection
     pass
 
 
@@ -65,15 +84,15 @@ class Suite2PVxPy(Entarchy):
                     self.add_new_entity(recording)
 
                     for jj in range(5):
-                        recording[f'param_int_{jj}'] = random.randint(0, 1000)
+                        recording[f'rec_param_int_{jj}'] = random.randint(0, 1000)
                     for jj in range(5):
-                        recording[f'param_float_{jj}'] = random.randint(0, 10000) / 10
+                        recording[f'rec_param_float_{jj}'] = random.randint(0, 10000) / 10
                     for jj in range(5):
-                        recording[f'param_string_{jj}'] = random.choice(['foo', 'bar', 'baz', 'lorem', 'ipsum', 'dolor'])
+                        recording[f'rec_param_string_{jj}'] = random.choice(['foo', 'bar', 'baz', 'lorem', 'ipsum', 'dolor'])
                     for jj in range(5):
-                        recording[f'param_array_{jj}'] = np.random.rand(random.randint(10, 100))
+                        recording[f'rec_param_array_{jj}'] = np.random.rand(random.randint(10, 100))
                     for jj in range(5):
-                        recording[f'param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
+                        recording[f'rec_param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
 
                     # for p in tqdm.tqdm(range(300), desc='Phases', position=2, leave=False):
                     p_num = 300
@@ -81,6 +100,17 @@ class Suite2PVxPy(Entarchy):
                     for p in range(p_num):
                         phase = Phase(self, _id=f'Phase_{p}', _parent=recording)
                         self.add_new_entity(phase)
+
+                        for jj in range(5):
+                            phase[f'phase_param_int_{jj}'] = random.randint(0, 1000)
+                        for jj in range(5):
+                            phase[f'phase_param_float_{jj}'] = random.randint(0, 10000) / 10
+                        for jj in range(5):
+                            phase[f'phase_param_string_{jj}'] = random.choice(['foo', 'bar', 'baz', 'lorem', 'ipsum', 'dolor'])
+                        for jj in range(5):
+                            phase[f'phase_param_array_{jj}'] = np.random.rand(random.randint(10, 100))
+                        for jj in range(5):
+                            phase[f'phase_param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
 
                     # for r in tqdm.tqdm(range(random.randint(400, 800)), desc='Rois', position=2, leave=False):
                     r_num = random.randint(400, 800)
@@ -90,42 +120,19 @@ class Suite2PVxPy(Entarchy):
                         self.add_new_entity(roi)
 
                         for jj in range(5):
-                            roi[f'param_int_{jj}'] = random.randint(0, 1000)
+                            roi[f'roi_param_int_{jj}'] = random.randint(0, 1000)
                         for jj in range(5):
-                            roi[f'param_float_{jj}'] = random.randint(0, 10000) / 10
+                            roi[f'roi_param_float_{jj}'] = random.randint(0, 10000) / 10
                         for jj in range(5):
-                            roi[f'param_string_{jj}'] = random.choice(['foo', 'bar', 'baz', 'lorem', 'ipsum', 'dolor'])
+                            roi[f'roi_param_string_{jj}'] = random.choice(['foo', 'bar', 'baz', 'lorem', 'ipsum', 'dolor'])
                         for jj in range(5):
-                            roi[f'param_array_{jj}'] = np.random.rand(random.randint(10, 100))
+                            roi[f'roi_param_array_{jj}'] = np.random.rand(random.randint(10, 100))
                         for jj in range(5):
-                            roi[f'param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
+                            roi[f'roi_param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
 
                     # Commit after each recording
                     self.commit()
 
 
 if __name__ == '__main__':
-
-    recreate = True
-    if 'recreate' in sys.argv:
-        recreate = True
-
-    # Recreate entarchy
-    if recreate:
-        try:
-            ente = Suite2PVxPy('./dev_test/path/')
-            ente.delete()
-        except:
-            pass
-
-        # Get connection data
-        with open('secret.txt', 'r') as f:
-            mysqldata = [f.readline().strip() for _ in range(4)]
-
-        _backend = MySQLBackend(dbhost=mysqldata[0],
-                                dbname=f'{mysqldata[1]}_test123',
-                                dbuser=mysqldata[2],
-                                dbpassword=mysqldata[3])
-
-        ente = Suite2PVxPy.create('./dev_test/path/', _backend)
-        ente.digest('')
+    pass
