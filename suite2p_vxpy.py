@@ -1,65 +1,157 @@
-import sys
+import os
+import pathlib
 
 import numpy as np
+import tifffile
+import yaml
 
-from entarchy import Entarchy, Entity, Collection
+import entarchy
 
 __all__ = ['Animal', 'Recording', 'Roi', 'Phase', 'Suite2PVxPy']
 
-from entarchy.backend import MySQLBackend
 
-
-class AnimalCollection(Collection):
+class AnimalCollection(entarchy.Collection):
     pass
 
 
-class RecordingCollection(Collection):
+class RecordingCollection(entarchy.Collection):
     pass
 
 
-class RoiCollection(Collection):
+class RoiCollection(entarchy.Collection):
     pass
 
 
-class PhaseCollection(Collection):
+class PhaseCollection(entarchy.Collection):
     pass
 
 
-class Animal(Entity):
-    _collection_cls = AnimalCollection
-    pass
+class Animal(entarchy.Entity):
+    collection_type = AnimalCollection
 
 
-class Recording(Entity):
-    _collection_cls = RecordingCollection
+class Recording(entarchy.Entity):
+    collection_type = RecordingCollection
     # # Child entity types may be added by name meta // Does not work yet
     # _child_entity_types = ['Roi', 'Phase']
     pass
 
 
-class Roi(Entity):
-    _collection_cls = RoiCollection
+class Layer(entarchy.Entity):
     pass
 
 
-class Phase(Entity):
-    _collection_cls = PhaseCollection
+class Roi(entarchy.Entity):
+    collection_type = RoiCollection
+    pass
+
+
+class Phase(entarchy.Entity):
+    collection_type = PhaseCollection
     pass
 
 
 # Child entity types may be added by method calls
 Animal.add_child_entity_type(Recording)
-Recording.add_child_entity_type(Roi)
+Recording.add_child_entity_type(Layer)
+Layer.add_child_entity_type(Roi)
 Recording.add_child_entity_type(Phase)
 
 
-class Suite2PVxPy(Entarchy):
+class Suite2PVxPy(entarchy.Entarchy):
 
     implementation_version = '0.2'
 
     _hierarchy_root = Animal
 
-    def digest(self, raw_data_path: str) -> None:
+    @entarchy.digest_method
+    def add_animal(self, path: str):
+
+        with self:
+
+            path = pathlib.Path(path).as_posix()
+
+            print(f'Add animal from path {path}')
+
+            # Create animal
+            path_parts = path.split('/')
+            animal_id = path_parts[-1]
+
+            # Create new animal entity
+            print(f'Create new entity for animal {animal_id}')
+            animal = Animal(self, _id=animal_id, _parent=None)
+            self.add_new_entity(animal)
+
+            # Search for zstacks
+            zstack_names = []
+            for fn in os.listdir(path):
+                _p = os.path.join(path, fn)
+                if os.path.isdir(_p):
+                    continue
+                if 'zstack' in fn:
+                    if fn.lower().endswith(('.tif', '.tiff')):
+                        zstack_names.append(fn)
+
+            # Add first stack that was detected
+            if len(zstack_names) > 0:
+                if len(zstack_names) > 1:
+                    print(f'WARNING: multiple zstacks detected, using {zstack_names[0]}')
+
+                print(f'Add zstack {zstack_names[0]}')
+
+                zstack_data = tifffile.imread(os.path.join(path, zstack_names[0]))
+
+                animal['zstack_fn'] = zstack_names[0]
+
+                print(f'Set array of size {zstack_data.shape}')
+                animal['zstack'] = zstack_data
+
+        # # Add metadata
+        # add_metadata(animal, path)
+
+        # # Search for valid registration path in animal folder
+        # valid_reg_path = None
+        # if 'ants_registration' in os.listdir(path):
+        #     for mov_folder in os.listdir(os.path.join(path, 'ants_registration')):
+        #         for ref_folder in os.listdir(os.path.join(path, 'ants_registration', mov_folder)):
+        #             reg_path = os.path.join(path, 'ants_registration', mov_folder, ref_folder)
+        #
+        #             # If there is a transform file, we'll take it
+        #             if 'Composite.h5' in os.listdir(reg_path):
+        #                 valid_reg_path = reg_path
+        #                 break
+        #
+        # # Write registration metadata to animal entity
+        # if valid_reg_path is not None:
+        #     print(f'Loading ANTs registration metadata at {valid_reg_path}')
+        #     ants_metadata = yaml.safe_load(open(os.path.join(valid_reg_path, 'metadata.yaml'), 'r'))
+        #     animal.update({f'ants/{n}': v for n, v in ants_metadata.items()})
+
+        return animal
+
+    def add_recording(self, animal: Animal, path: str, layer_idx: int) -> Recording:
+
+        # Create debug folder
+        debug_folder_path = os.path.join(path, 'debug')
+        if not os.path.exists(debug_folder_path):
+            os.mkdir(debug_folder_path)
+
+        # Get recording
+        rec_id = f"{pathlib.Path(path).as_posix().split('/')[-1]}_layer{layer_idx}"
+
+        recording = Recording(self, _id=rec_id, _parent=animal)
+
+        self.add_new_entity(recording)
+        recording['animal_id'] = animal.id
+        recording['rec_id'] = rec_id
+
+        # Add metadata
+        add_metadata(recording, path)
+
+        return recording
+
+    @entarchy.digest_method
+    def digest(self) -> None:
 
         import random
 
@@ -132,6 +224,37 @@ class Suite2PVxPy(Entarchy):
 
                     # Commit after each recording
                     self.commit()
+
+
+def add_metadata(entity: entarchy.Entity, folder_path: str):
+    """Function searches for and returns metadata on a given folder path
+
+    Function scans the `folder_path` for metadata yaml files (ending in `meta.yaml`)
+    and returns a dictionary containing their contents
+    """
+
+    meta_files = [f for f in os.listdir(folder_path) if f.endswith('metadata.yaml')]
+
+    print(f'Found {len(meta_files)} metadata files in {folder_path}.')
+
+    metadata = {}
+    for f in meta_files:
+        with open(os.path.join(folder_path, f), 'r') as stream:
+            try:
+                metadata.update(yaml.safe_load(stream))
+            except yaml.YAMLError as exc:
+                print(exc)
+
+    # Add metadata
+    unravel_dict(metadata, entity, 'metadata')
+
+
+def unravel_dict(dict_data: dict, entity: entarchy.Entity, path: str):
+    for key, item in dict_data.items():
+        if isinstance(item, dict):
+            unravel_dict(item, entity, f'{path}/{key}')
+            continue
+        entity[f'{path}/{key}'] = item
 
 
 if __name__ == '__main__':
