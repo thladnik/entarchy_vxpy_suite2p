@@ -7,7 +7,7 @@ import yaml
 
 import entarchy
 
-__all__ = ['Animal', 'Recording', 'Roi', 'Phase', 'Suite2PVxPy']
+__all__ = ['Animal', 'Recording', 'Layer', 'Roi', 'Phase', 'Suite2PVxPy']
 
 
 class AnimalCollection(entarchy.Collection):
@@ -71,15 +71,15 @@ class Suite2PVxPy(entarchy.Entarchy):
 
             path = pathlib.Path(path).as_posix()
 
-            print(f'Add animal from path {path}')
+            print(f'> Add animal from path {path}')
 
             # Create animal
             path_parts = path.split('/')
             animal_id = path_parts[-1]
 
             # Create new animal entity
-            print(f'Create new entity for animal {animal_id}')
-            animal = Animal(self, _id=animal_id, _parent=None)
+            print(f'>> Create new entity for animal {animal_id}')
+            animal = Animal(self, _id=animal_id, _parent=self.root)
             self.add_new_entity(animal)
 
             # Search for zstacks
@@ -97,61 +97,58 @@ class Suite2PVxPy(entarchy.Entarchy):
                 if len(zstack_names) > 1:
                     print(f'WARNING: multiple zstacks detected, using {zstack_names[0]}')
 
-                print(f'Add zstack {zstack_names[0]}')
-
+                # Load zstack
                 zstack_data = tifffile.imread(os.path.join(path, zstack_names[0]))
 
+                print(f'>> Add zstack {zstack_names[0]} of shape {zstack_data.shape}')
                 animal['zstack_fn'] = zstack_names[0]
-
-                print(f'Set array of size {zstack_data.shape}')
                 animal['zstack'] = zstack_data
 
-        # # Add metadata
-        # add_metadata(animal, path)
+        # Add metadata
+        add_metadata(animal, path)
 
-        # # Search for valid registration path in animal folder
-        # valid_reg_path = None
-        # if 'ants_registration' in os.listdir(path):
-        #     for mov_folder in os.listdir(os.path.join(path, 'ants_registration')):
-        #         for ref_folder in os.listdir(os.path.join(path, 'ants_registration', mov_folder)):
-        #             reg_path = os.path.join(path, 'ants_registration', mov_folder, ref_folder)
-        #
-        #             # If there is a transform file, we'll take it
-        #             if 'Composite.h5' in os.listdir(reg_path):
-        #                 valid_reg_path = reg_path
-        #                 break
-        #
-        # # Write registration metadata to animal entity
-        # if valid_reg_path is not None:
-        #     print(f'Loading ANTs registration metadata at {valid_reg_path}')
-        #     ants_metadata = yaml.safe_load(open(os.path.join(valid_reg_path, 'metadata.yaml'), 'r'))
-        #     animal.update({f'ants/{n}': v for n, v in ants_metadata.items()})
+        # Search for valid registration path in animal folder
+        valid_reg_path = None
+        if 'ants_registration' in os.listdir(path):
+            for mov_folder in os.listdir(os.path.join(path, 'ants_registration')):
+                for ref_folder in os.listdir(os.path.join(path, 'ants_registration', mov_folder)):
+                    reg_path = os.path.join(path, 'ants_registration', mov_folder, ref_folder)
+
+                    # If there is a transform file, we'll take it
+                    if 'Composite.h5' in os.listdir(reg_path):
+                        valid_reg_path = reg_path
+                        break
+
+        # Write registration metadata to animal entity
+        if valid_reg_path is not None:
+            print(f'Loading ANTs registration metadata at {valid_reg_path}')
+            ants_metadata = yaml.safe_load(open(os.path.join(valid_reg_path, 'metadata.yaml'), 'r'))
+            animal.update({f'ants/{n}': v for n, v in ants_metadata.items()})
 
         return animal
 
     def add_recording(self, animal: Animal, path: str, layer_idx: int) -> Recording:
 
-        # Create debug folder
-        debug_folder_path = os.path.join(path, 'debug')
-        if not os.path.exists(debug_folder_path):
-            os.mkdir(debug_folder_path)
+        with self:
 
-        # Get recording
-        rec_id = f"{pathlib.Path(path).as_posix().split('/')[-1]}_layer{layer_idx}"
+            # Create debug folder
+            debug_folder_path = os.path.join(path, 'debug')
+            if not os.path.exists(debug_folder_path):
+                os.mkdir(debug_folder_path)
 
-        recording = Recording(self, _id=rec_id, _parent=animal)
+            # Get recording
+            rec_id = f"{pathlib.Path(path).as_posix().split('/')[-1]}_layer{layer_idx}"
 
-        self.add_new_entity(recording)
-        recording['animal_id'] = animal.id
-        recording['rec_id'] = rec_id
+            recording = Recording(self, _id=rec_id, _parent=animal)
+            self.add_new_entity(recording)
 
-        # Add metadata
-        add_metadata(recording, path)
+            # Add metadata
+            add_metadata(recording, path)
 
-        return recording
+            return recording
 
     @entarchy.digest_method
-    def digest(self) -> None:
+    def test_digest(self) -> None:
 
         import random
 
@@ -161,16 +158,18 @@ class Suite2PVxPy(entarchy.Entarchy):
 
             # for i in tqdm.tqdm(range(3), desc='Animals', position=0):
             for i in range(3):
-                animal = Animal(self, _id=f'Animal_{i}', _parent=None)
+                animal = Animal(self, _id=f'Animal_{i}', _parent=self.root)
                 print(f'Add {animal}')
                 for k, v in {'age': random.randint(24, 96),
                              'weight': random.randint(20, 100) / 10,
-                             'strain': random.choice(['jf1', 'mpn400', 'jf7'])}.items():
+                             'strain': random.choice(['jf1', 'mpn400', 'jf7']),
+                             'zstack': np.random.randint(0, 255, size=(50, 512, 512), dtype=np.uint8)}.items():
                     animal[k] = v
+
                 self.add_new_entity(animal)
 
                 # for j in tqdm.tqdm(range(7), desc='Recordings', position=1, leave=False):
-                for j in range(random.randint(3, 8)):
+                for j in range(random.randint(2, 4)):
                     recording = Recording(self, _id=f'Recording_{j}', _parent=animal)
                     print(f'> Add {recording}')
                     self.add_new_entity(recording)
@@ -185,6 +184,10 @@ class Suite2PVxPy(entarchy.Entarchy):
                         recording[f'rec_param_array_{jj}'] = np.random.rand(random.randint(10, 100))
                     for jj in range(5):
                         recording[f'rec_param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
+                    for jj in range(2):
+                        recording[f'rec_param_largelist_{jj}'] = ['abc'] * 20_000_000
+                    for jj in range(2):
+                        recording[f'rec_param_largearray_{jj}'] = np.random.rand(*np.random.randint(50, 150, size=(3,)))
 
                     # for p in tqdm.tqdm(range(300), desc='Phases', position=2, leave=False):
                     p_num = 300
@@ -204,26 +207,36 @@ class Suite2PVxPy(entarchy.Entarchy):
                         for jj in range(5):
                             phase[f'phase_param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
 
-                    # for r in tqdm.tqdm(range(random.randint(400, 800)), desc='Rois', position=2, leave=False):
-                    r_num = random.randint(400, 800)
-                    print(f'>> Add {r_num} Rois')
-                    for r in range(r_num):
-                        roi = Roi(self, _id=f'Roi_{r}', _parent=recording)
-                        self.add_new_entity(roi)
+                    for li in range(5):
 
-                        for jj in range(5):
-                            roi[f'roi_param_int_{jj}'] = random.randint(0, 1000)
-                        for jj in range(5):
-                            roi[f'roi_param_float_{jj}'] = random.randint(0, 10000) / 10
-                        for jj in range(5):
-                            roi[f'roi_param_string_{jj}'] = random.choice(['foo', 'bar', 'baz', 'lorem', 'ipsum', 'dolor'])
-                        for jj in range(5):
-                            roi[f'roi_param_array_{jj}'] = np.random.rand(random.randint(10, 100))
-                        for jj in range(5):
-                            roi[f'roi_param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
+                        print('>> Add Layer', li)
+                        layer = Layer(self, _id=f'Layer_{li}', _parent=recording)
+                        self.add_new_entity(layer)
 
-                    # Commit after each recording
-                    self.commit()
+                        # for r in tqdm.tqdm(range(random.randint(400, 800)), desc='Rois', position=2, leave=False):
+                        r_num = random.randint(200, 400)
+                        print(f'>>> Add {r_num} Rois')
+                        for r in range(r_num):
+                            roi = Roi(self, _id=f'Roi_{r}', _parent=layer)
+                            self.add_new_entity(roi)
+
+                            for jj in range(5):
+                                roi[f'roi_param_int_{jj}'] = random.randint(0, 1000)
+                            for jj in range(5):
+                                roi[f'roi_param_float_{jj}'] = random.randint(0, 10000) / 10
+                            for jj in range(5):
+                                roi[f'roi_param_string_{jj}'] = random.choice(['foo', 'bar', 'baz', 'lorem', 'ipsum', 'dolor'])
+                            for jj in range(5):
+                                roi[f'roi_param_array_{jj}'] = np.random.rand(random.randint(10, 100))
+                            for jj in range(5):
+                                roi[f'roi_param_list_{jj}'] = [random.randint(0, 100) for _ in range(random.randint(10, 100))]
+                            for jj in range(2):
+                                roi[f'roi_param_largelist_{jj}'] = ['abc'] * 2_000_000
+                            for jj in range(2):
+                                roi[f'roi_param_largearray_{jj}'] = np.random.rand(*np.random.randint(1, 70, size=(3,)))
+
+                        # Commit after each layer
+                        self.commit()
 
 
 def add_metadata(entity: entarchy.Entity, folder_path: str):
