@@ -218,11 +218,11 @@ class Suite2PVxPy(entarchy.Entarchy):
 
         path = pathlib.Path(path).as_posix()
 
+        print(f'Process recording folder {path}')
+
         with self:
 
-            print(f'Process recording folder {path}')
-
-            print('Calculate frame timing of signal')
+            print('> Calculate frame timing of signal')
             with h5py.File(os.path.join(path, 'Io.hdf5'), 'r') as io_file:
 
                 sync_data = np.squeeze(io_file[sync_signal])[:]
@@ -253,16 +253,15 @@ class Suite2PVxPy(entarchy.Entarchy):
                 layers.append(_name)
             layer_num = len(layers)
 
-            print(f'Add Recording from path {path} with {len(layers)} layers')
 
             # Create recording
             path_parts = path.split('/')
             recording_id = path_parts[-1]
 
             # Create new recording entity
-            print(f'> Create new entity for recording {recording_id}')
             recording = Recording(self, _id=recording_id, _parent=animal)
             self.add_new_entity(recording)
+            print(f'> Create {recording}')
 
             # Add metadata
             add_metadata(recording, path)
@@ -290,13 +289,12 @@ class Suite2PVxPy(entarchy.Entarchy):
             dt_frames = np.diff(frame_times).mean()  # seconds
             imaging_rate = 1. / dt_frames  # Hz
             recording['imaging_rate'] = imaging_rate
-            print(f'Estimated, effective imaging rate {imaging_rate:.2f}Hz')
+            print(f'> Estimated, effective imaging rate {imaging_rate:.2f}Hz')
 
             # Interpolate record_group_ids to frame times
             record_group_ids = ca_rec_group_id_fun(frame_times)
             recording['record_group_ids'] = record_group_ids
 
-            print(f'>> Process recording data in {path}')
             for data_fn in os.listdir(path):
                 if not any([data_fn.lower().endswith(fn) for fn in ['.h5', 'hdf5']]):
                     continue
@@ -329,7 +327,6 @@ class Suite2PVxPy(entarchy.Entarchy):
                                 phase = Phase(self, _id=key1, _parent=recording)
                                 self.add_new_entity(phase)
                                 phase_data[key1] = phase
-
                                 phase['index'] = int(key1.replace('phase', ''))
 
                                 # Add calcium start/end indices
@@ -347,7 +344,8 @@ class Suite2PVxPy(entarchy.Entarchy):
                             for key2, member2 in member1.items():
                                 if isinstance(member2, h5py.Dataset):
                                     phase[key2] = np.squeeze(member2[:])
-                                print('WARNING: nested groups in phase not supported yet')
+                                else:
+                                    print('WARNING: nested groups in phase not supported yet')
 
                         # Add other data
                         else:
@@ -362,10 +360,10 @@ class Suite2PVxPy(entarchy.Entarchy):
 
             for layer_str in layers:
 
-                print(f'>> Process layer {layer_str}')
                 # Add layer
                 layer = Layer(self, _id=layer_str, _parent=recording)
                 self.add_new_entity(layer)
+                print(f'> Process {layer}')
 
                 # Get path to plane data
                 s2p_path = os.path.join(path, 'suite2p', layer_str)
@@ -377,11 +375,11 @@ class Suite2PVxPy(entarchy.Entarchy):
                 frame_times = frame_times_by_layer[layer_idx]
 
                 # Load suite2p's analysis options
-                print('Include suite2p ops')
+                print('>> Include suite2p ops')
                 ops = np.load(os.path.join(s2p_path, 'ops.npy'), allow_pickle=True).item()
-                unravel_dict(ops, recording, 's2p')
+                unravel_dict(ops, layer, 's2p')
 
-                print('Load ROI data')
+                print('>> Load ROI data')
                 fluorescence = np.load(os.path.join(s2p_path, 'F.npy'), allow_pickle=True)
                 spikes_all = np.load(os.path.join(s2p_path, 'spks.npy'), allow_pickle=True)
                 roi_stats_all = np.load(os.path.join(s2p_path, 'stat.npy'), allow_pickle=True)
@@ -410,9 +408,6 @@ class Suite2PVxPy(entarchy.Entarchy):
                 layer['roi_num'] = fluorescence.shape[0]
                 layer['t_offset'] = layer_idx * dt_frames / layer_num
 
-                # Commit recording
-                self.commit()
-
                 print('Load anatomical registration data')
                 roi_coordinates = None
                 if 'ants_registration' in os.listdir(os.path.join(path, 'suite2p')):
@@ -432,7 +427,7 @@ class Suite2PVxPy(entarchy.Entarchy):
                     print('WARNING: no ANTs registration data found')
 
                 # Add suite2p's analysis ROI stats
-                print('Add ROI stats and signals')
+                print('>> Add ROI stats and signals')
                 for roi_idx in tqdm.tqdm(range(fluorescence.shape[0])):
                     # Create ROI
                     roi = Roi(self, _id=f'Roi_{roi_idx}', _parent=layer)
@@ -442,8 +437,7 @@ class Suite2PVxPy(entarchy.Entarchy):
                     roi_stats = roi_stats_all[roi_idx]
 
                     # Write ROI stats
-                    for k, v in roi_stats.items():
-                        layer[f's2p/{k}'] = v
+                    roi.update({f's2p/{k}': v for k, v in roi_stats.items()})
 
                     # Write ROI coordinates
                     if roi_coordinates is not None:
@@ -457,7 +451,7 @@ class Suite2PVxPy(entarchy.Entarchy):
                     if iscell_all is not None:
                         roi['iscell'] = iscell_all[roi_idx]
 
-                # Commit rois
+                # Commit layer
                 self.commit()
 
             # Add recording-level timing data after layers have been processed
@@ -469,7 +463,6 @@ class Suite2PVxPy(entarchy.Entarchy):
             self.commit()
 
         return recording
-
 
     # @entarchy.digest_method
     # def test_digest(self) -> None:

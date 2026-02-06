@@ -1,0 +1,45 @@
+[build-system]
+requires      = ["setuptools>=65.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "entarchy_vxpy_suite2p"
+version = "0.1"
+description = ""
+readme = "README.md"
+authors = [{ name = 'Tim Hladnik', email = "contact@vxpy.org" }]
+license = { file = 'LICENSE' }
+classifiers = [
+        'Development Status :: 3 - Alpha',
+        'Intended Audience :: Science/Research',
+        'License :: OSI Approved :: GNU General Public License v3 (GPLv3)',
+        'Operating System :: POSIX :: Linux',
+        'Operating System :: Microsoft :: Windows',
+        'Operating System :: Microsoft :: Windows :: Windows 11',
+        'Programming Language :: Python',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
+        'Topic :: Scientific/Engineering',
+        'Topic :: Data Analysis'
+]
+keywords = ['neuroscience', 'vxpy', 'suite2p', 'data analysis', 'two-photon microscopy']
+dependencies = [
+    'h5py',
+    'numpy',
+    'pandas',
+    'pyyaml',
+    'scipy',
+    'tables',
+    'tifffile',
+    'tqdm'
+]
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ['.']
+include = ['entarchy_vxpy_suite2p*']
+
+[project.urls]
+Homepage = 'https://github.com/thladnik/entarchy_vxpy_suite2p'
