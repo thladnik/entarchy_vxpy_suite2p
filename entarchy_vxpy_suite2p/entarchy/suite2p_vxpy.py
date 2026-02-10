@@ -13,6 +13,7 @@ import yaml
 
 import entarchy
 
+
 __all__ = ['Animal', 'Recording', 'Layer', 'Roi', 'Phase', 'Suite2PVxPy']
 
 
@@ -71,11 +72,11 @@ class Animal(entarchy.Entity):
 
     @property
     def recordings(self) -> RecordingCollection:
-        return self.entarchy.get(Recording, f'[Animal]uuid == {self.uuid}') # type: ignore
+        return self.entarchy.get(Recording, f'[Animal]uuid == "{self.uuid}"')  # type: ignore
 
     @property
     def rois(self) -> RoiCollection:
-        return self.entarchy.get(Roi, f'[Animal]uuid == {self.uuid}') # type: ignore
+        return self.entarchy.get(Roi, f'[Animal]uuid == "{self.uuid}"')  # type: ignore
 
 
 class Recording(entarchy.Entity):
@@ -89,11 +90,15 @@ class Recording(entarchy.Entity):
 
     @property
     def phases(self) -> PhaseCollection:
-        return self.entarchy.get(Phase, f'[Recording]uuid == {self.uuid}') # type: ignore
+        return self.entarchy.get(Phase, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
+
+    @property
+    def layers(self) -> PhaseCollection:
+        return self.entarchy.get(Layer, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
 
     @property
     def rois(self) -> RoiCollection:
-        return self.entarchy.get(Roi, f'[Recording]uuid == {self.uuid}') # type: ignore
+        return self.entarchy.get(Roi, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
 
 
 class Phase(entarchy.Entity):
@@ -112,19 +117,27 @@ class Layer(entarchy.Entity):
 
     @property
     def rois(self):
-        return self.entarchy.get(Roi, f'[Recording]uuid == {self.uuid}')
+        return self.entarchy.get(Roi, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
 
     @property
     def recording(self) -> Recording:
-        return self.parent # type: ignore
+        return self.parent  # type: ignore
 
     @property
     def animal(self) -> Animal:
-        return self.recording.parent # type: ignore
+        return self.recording.animal  # type: ignore
 
 
 class Roi(entarchy.Entity):
     collection_type = RoiCollection
+
+    @property
+    def layer(self) -> Layer:
+        return self.parent  # type: ignore
+
+    @property
+    def recording(self) -> Recording:
+        return self.layer.recording  # type: ignore
 
 
 # Child entity types may be added by method calls
@@ -141,17 +154,23 @@ class Suite2PVxPy(entarchy.Entarchy):
     _hierarchy_root = Animal
 
     @entarchy.digest_method
-    def add_animal(self, path: str):
+    def add_animal(self, path: str) -> Animal:
+
+        path = pathlib.Path(path).as_posix()
+
+        print(f'> Add animal from path {path}')
+
+        # Create animal
+        path_parts = path.split('/')
+        animal_id = path_parts[-1]
+
+        animal_collection = (self.get(Animal) & f'id == "{animal_id}"')
+
+        if len(animal_collection) > 0:
+            print(f'WARNING: recording with id {animal_id} already exists. Skipping.')
+            return animal_collection[0]
 
         with self:
-
-            path = pathlib.Path(path).as_posix()
-
-            print(f'> Add animal from path {path}')
-
-            # Create animal
-            path_parts = path.split('/')
-            animal_id = path_parts[-1]
 
             # Create new animal entity
             print(f'>> Create new entity for animal {animal_id}')
@@ -208,7 +227,7 @@ class Suite2PVxPy(entarchy.Entarchy):
     @entarchy.digest_method
     def add_recording(self, animal: Animal, path: str,
                       sync_signal: str = None, sync_signal_time: str = None,
-                      sync_type = None, frame_avg_num: int | Callable = 1) -> Recording:
+                      sync_type = None, frame_avg_num: int | Callable = 1) -> Recording | None:
 
         sync_type = 'y_mirror' if sync_type is None else sync_type
 
@@ -217,6 +236,22 @@ class Suite2PVxPy(entarchy.Entarchy):
         sync_signal_time = f'{sync_signal}_time' if sync_signal_time is None else sync_signal_time
 
         path = pathlib.Path(path).as_posix()
+
+        # Create recording
+        path_parts = path.split('/')
+        recording_id = path_parts[-1]
+
+        # Check if recording with same id already exists for this animal
+        if len(self.get(Recording, f'id == "{recording_id}" and [Animal]uuid == "{animal.uuid}"')) > 0:
+            print(f'WARNING: recording with id {recording_id} already exists for animal {animal.id}. Skipping.')
+            return None
+
+        # Check if path appears to be a recording path by looking for expected files
+        is_rec_path = any(n in [n1.lower() for n1 in os.listdir(path)]
+                          for n in ['io.hdf5', 'camera.hdf5', 'display.hdf5', 'gui.hdf5'])
+        if not is_rec_path:
+            print(f'WARNING: {path} does not appear to be vxpy recording folder. Skipping.')
+            return None
 
         print(f'Process recording folder {path}')
 
@@ -252,11 +287,6 @@ class Suite2PVxPy(entarchy.Entarchy):
                     continue
                 layers.append(_name)
             layer_num = len(layers)
-
-
-            # Create recording
-            path_parts = path.split('/')
-            recording_id = path_parts[-1]
 
             # Create new recording entity
             recording = Recording(self, _id=recording_id, _parent=animal)
@@ -451,16 +481,10 @@ class Suite2PVxPy(entarchy.Entarchy):
                     if iscell_all is not None:
                         roi['iscell'] = iscell_all[roi_idx]
 
-                # Commit layer
-                self.commit()
-
             # Add recording-level timing data after layers have been processed
             #  (frame_times may be truncated to match signal length, so we need to add them after processing layers)
             recording['signal_length'] = frame_times.shape[0]
             recording['ca_times'] = frame_times
-
-            # Commit phases and display data
-            self.commit()
 
         return recording
 
