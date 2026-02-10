@@ -13,6 +13,11 @@ from ... import *
 
 def calculate_dff(roi: Roi, window_size: int = 120, percentile: int = 10):
 
+    # TODO: temporary to deal with incomplete entities (ingest problem)
+    if 'fluorescence' not in roi:
+        print(f'Failed to process {roi} altogether')
+        return
+
     # Calculate DFF
     imaging_rate = roi.recording['imaging_rate']
     window_size = int(window_size * imaging_rate)
@@ -31,15 +36,15 @@ def calculate_dff(roi: Roi, window_size: int = 120, percentile: int = 10):
         fsub = f_padded[i:i + window_size]
         fmean = np.mean(fsub[fsub < np.percentile(fsub, percentile)])
         dff[i] = (fluorescence[i] - fmean) / fmean
+
     # Save
     roi['dff'] = dff
-
-    roi.entarchy.backend.close()
 
 
 def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: int = 16):
     # Get data
 
+    # TODO: temporary to deal with incomplete entities (ingest problem)
     if 'ca_times' not in rec:
         print(f'Failed to process {rec} altogether')
         return
@@ -86,7 +91,7 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
 
     # The stimulation protocol for this recording contains no CMN sitmuli? No need to process the CMN data
     if not any('CMN' in n for n in rec.phases['display/__visual_name'].values):
-        print(f'No CMN in {rec}')
+        # print(f'No CMN in {rec}')
         return
 
     # Define up direction based on fish orientation during registration
@@ -165,8 +170,8 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
             #
             # cmn_motion_vectors_3d_original[selection_original] = motion_vectors_full[frame_indices[indices]]
 
-        layer['cmn_phase_selection_original'] = cmn_phase_selection_original
-        layer['cmn_phase_ids_original'] = cmn_phase_ids_original
+        # layer['cmn_phase_selection_original'] = cmn_phase_selection_original
+        # layer['cmn_phase_ids_original'] = cmn_phase_ids_original
         layer['cmn_phase_selection'] = cmn_phase_selection
         layer['cmn_phase_ids'] = cmn_phase_ids
         layer['cmn_motion_vectors_3d'] = cmn_motion_vectors_3d
@@ -247,8 +252,17 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
 
 
 def calculate_autocorrelations(roi: Roi):
-    repeat_num = roi.recording['metadata/repeat_num']
+
+    # TODO: temporary to deal with incomplete entities (ingest problem)
+    if (
+            'metadata/repeat_num' not in roi.recording
+            or 'ca_times' not in roi.recording
+            or 'dff' not in roi
+    ):
+        return
+
     dff = roi['dff']
+    repeat_num = roi.recording['metadata/repeat_num']
     ca_times = roi.recording['ca_times']
     time_resampled = roi.recording['time_resampled']
 
@@ -273,11 +287,20 @@ def calculate_autocorrelations(roi: Roi):
 
 
 def detect_events_with_derivative(roi: Roi, excluded_percentile: int = 25, kernel_sd: float = 0.5):
-    cmn_selection = roi.recording['cmn_phase_selection']
+
+    # TODO: temporary to deal with incomplete entities (ingest problem)
+    if (
+            'metadata/repeat_num' not in roi.recording
+            or 'ca_times' not in roi.recording
+            or 'dff' not in roi
+    ):
+        return
+
     dff = roi['dff_resampled']
     sample_rate = roi.recording['sample_rate']
+    cmn_selection = roi.layer['cmn_phase_selection']
 
-    kernel_dts = 10 * sample_rate
+    kernel_dts = int(10 * sample_rate)
     kernel_t = np.linspace(-5, 5, kernel_dts)
     norm_kernel = scipy.stats.norm.pdf(kernel_t, scale=kernel_sd)
 
@@ -318,6 +341,15 @@ def calculate_reverse_correlations(roi: Roi,
     use_gpu: bool whether to use GPU or not. True for GPU and False for CPU only (default: False)
     """
 
+    # TODO: temporary to deal with incomplete entities (ingest problem)
+    if (
+            'metadata/repeat_num' not in roi.recording
+            or 'ca_times' not in roi.recording
+            or 'dff' not in roi
+    ):
+        return
+
+
     # ROI data
     signal_selection = roi['signal_selection']
 
@@ -331,8 +363,8 @@ def calculate_reverse_correlations(roi: Roi,
     # Recording data
     sample_rate = roi.recording['sample_rate']
     radial_bin_edges = roi.recording['radial_bin_edges']
-    motion_vectors_2d = roi.recording['cmn_motion_vectors_2d']
-    cmn_phase_selection = roi.recording['cmn_phase_selection']
+    motion_vectors_2d = roi.layer['cmn_motion_vectors_2d']
+    cmn_phase_selection = roi.layer['cmn_phase_selection']
 
     radial_bin_norms, radial_bin_etas = calculate_local_directions(motion_vectors_2d[signal_selection],
                                                                    radial_bin_edges)
@@ -400,6 +432,15 @@ def run_2step_ncb_test(roi: Roi,
                        cluster_alpha: float = 0.05,
                        sign_radial_bin_threshold: int = 1,
                        postfix: str = ''):
+
+    # TODO: temporary to deal with incomplete entities (ingest problem)
+    if (
+            'metadata/repeat_num' not in roi.recording
+            or 'ca_times' not in roi.recording
+            or 'dff' not in roi
+    ):
+        return
+
     # Roi
     radial_bin_etas = roi[f'radial_bin_etas{postfix}']
     bs_radial_bin_etas = roi[f'bs_radial_bin_etas{postfix}']
@@ -548,6 +589,15 @@ def _calc_preferred_directions(bin_etas: np.ndarray, bin_significances: np.ndarr
 
 def calculate_egomotion_similarities(roi: Roi, postfix: str = ''):
     """"""
+
+    # TODO: temporary to deal with incomplete entities (ingest problem)
+    if (
+            'metadata/repeat_num' not in roi.recording
+            or 'ca_times' not in roi.recording
+            or 'dff' not in roi
+    ):
+        return
+
 
     if not roi[f'has_receptive_field{postfix}']:
         return

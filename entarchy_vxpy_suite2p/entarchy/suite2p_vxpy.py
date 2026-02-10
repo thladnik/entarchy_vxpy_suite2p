@@ -59,6 +59,10 @@ class RecordingCollection(entarchy.Collection):
     pass
 
 
+class LayerCollection(entarchy.Collection):
+    pass
+
+
 class RoiCollection(entarchy.Collection):
     pass
 
@@ -93,7 +97,7 @@ class Recording(entarchy.Entity):
         return self.entarchy.get(Phase, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
 
     @property
-    def layers(self) -> PhaseCollection:
+    def layers(self) -> LayerCollection:
         return self.entarchy.get(Layer, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
 
     @property
@@ -114,6 +118,7 @@ class Phase(entarchy.Entity):
 
 
 class Layer(entarchy.Entity):
+    collection_type = LayerCollection
 
     @property
     def rois(self):
