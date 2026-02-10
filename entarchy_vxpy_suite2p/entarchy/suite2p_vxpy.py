@@ -17,6 +17,9 @@ import entarchy
 __all__ = ['Animal', 'Recording', 'Layer', 'Roi', 'Phase', 'Suite2PVxPy']
 
 
+
+# TODO: replace scipy here, it's overkill and only used twice
+
 # Frame time calculation methods
 
 def ca_frame_times_from_y_mirror(mirror_position: np.ndarray, mirror_time: np.ndarray):

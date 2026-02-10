@@ -26,6 +26,7 @@ classifiers = [
 ]
 keywords = ['neuroscience', 'vxpy', 'suite2p', 'data analysis', 'two-photon microscopy']
 dependencies = [
+    'git+https://github.com/thladnik/entarchy',
     'h5py',
     'numpy',
     'pandas',
@@ -36,6 +37,12 @@ dependencies = [
     'tqdm'
 ]
 requires-python = ">=3.10"
+
+[project.optional-dependencies]
+cmn = [
+    'scipy',
+    'torch',
+]
 
 [tool.setuptools.packages.find]
 where = ['.']
