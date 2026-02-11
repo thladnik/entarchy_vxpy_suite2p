@@ -26,7 +26,7 @@ classifiers = [
 ]
 keywords = ['neuroscience', 'vxpy', 'suite2p', 'data analysis', 'two-photon microscopy']
 dependencies = [
-    'git+https://github.com/thladnik/entarchy',
+    'entarchy @ git+https://github.com/thladnik/entarchy',
     'h5py',
     'numpy',
     'pandas',
