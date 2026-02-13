@@ -13,11 +13,6 @@ from ... import *
 
 def calculate_dff(roi: Roi, window_size: int = 120, percentile: int = 10):
 
-    # TODO: temporary to deal with incomplete entities (ingest problem)
-    if 'fluorescence' not in roi:
-        print(f'Failed to process {roi} altogether')
-        return
-
     # Calculate DFF
     imaging_rate = roi.recording['imaging_rate']
     window_size = int(window_size * imaging_rate)
@@ -49,13 +44,10 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
         print(f'Failed to process {rec} altogether')
         return
 
+    repeat_num = rec['metadata/repeat_num']
+
     ca_times = rec['ca_times']
     time_resampled = np.arange(ca_times[0], ca_times[-1], 1 / sample_rate)
-    try:
-        repeat_num = rec['metadata/repeat_num']
-    except:
-        repeat_num = 2
-
     rec['time_resampled'] = time_resampled
     rec['sample_rate'] = sample_rate
 
@@ -110,8 +102,8 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
         layer_t_offset = layer['t_offset']
 
         # Go through all CMN phases and add CMN data to resampled time domain
-        cmn_phase_ids_original = np.zeros_like(ca_times, dtype=int)
-        cmn_phase_selection_original = np.zeros_like(ca_times, dtype=bool)
+        # cmn_phase_ids_original = np.zeros_like(ca_times, dtype=int)
+        # cmn_phase_selection_original = np.zeros_like(ca_times, dtype=bool)
         cmn_phase_ids = np.zeros_like(time_resampled, dtype=int)
         cmn_phase_selection = np.zeros_like(time_resampled, dtype=bool)
         cmn_motion_vectors_3d = None
@@ -253,18 +245,8 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
 
 def calculate_autocorrelations(roi: Roi):
 
-    # TODO: temporary to deal with incomplete entities (ingest problem)
-    if (
-            'metadata/repeat_num' not in roi.recording
-            or 'ca_times' not in roi.recording
-            or 'dff' not in roi
-    ):
-        return
-
     dff = roi['dff']
-    repeat_num = roi.recording['metadata/repeat_num']
-    ca_times = roi.recording['ca_times']
-    time_resampled = roi.recording['time_resampled']
+    repeat_num, ca_times, time_resampled = roi.recording[['metadata/repeat_num', 'ca_times', 'time_resampled']]
 
     # Interpolate DFF to new time
     roi['dff_resampled'] = scipy.interpolate.interp1d(ca_times, dff, kind='nearest')(time_resampled)
@@ -287,14 +269,6 @@ def calculate_autocorrelations(roi: Roi):
 
 
 def detect_events_with_derivative(roi: Roi, excluded_percentile: int = 25, kernel_sd: float = 0.5):
-
-    # TODO: temporary to deal with incomplete entities (ingest problem)
-    if (
-            'metadata/repeat_num' not in roi.recording
-            or 'ca_times' not in roi.recording
-            or 'dff' not in roi
-    ):
-        return
 
     dff = roi['dff_resampled']
     sample_rate = roi.recording['sample_rate']
@@ -333,22 +307,16 @@ def detect_events_with_derivative(roi: Roi, excluded_percentile: int = 25, kerne
 
 def calculate_reverse_correlations(roi: Roi,
                                    bootstrap_num: int = 1000,
-                                   use_gpu: bool = False,
-                                   use_cmn_phase_id: int = None):
+                                   use_cmn_phase_id: int = None,
+                                   _use_gpu_device: str = None):
     """
     roi: Roi entity object to operate on
     bootstrap_num: int number of bootstrap iterations (default: 1000)
     use_gpu: bool whether to use GPU or not. True for GPU and False for CPU only (default: False)
     """
-
-    # TODO: temporary to deal with incomplete entities (ingest problem)
-    if (
-            'metadata/repeat_num' not in roi.recording
-            or 'ca_times' not in roi.recording
-            or 'dff' not in roi
-    ):
-        return
-
+    device = _use_gpu_device
+    if device is None:
+        device = 'cpu'
 
     # ROI data
     signal_selection = roi['signal_selection']
@@ -381,47 +349,51 @@ def calculate_reverse_correlations(roi: Roi,
     bs_radial_bin_etas = np.zeros((bootstrap_num,) + radial_bin_etas.shape)
     signal_within_cmn_selection = signal_selection[cmn_phase_selection]
 
+    # if use_gpu and torch.cuda.is_available():
+    #     device = f'cuda:{gpu_device_num}'
+    # else:
+    #     device = 'cpu'
+
     # Compute
-    if use_gpu:
+    # print(f'Use {device}')
+    # if device != 'cpu':
 
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # Convert numpy arrays to PyTorch tensors
+    motion_vectors_2d_tensor = torch.tensor(motion_vectors_2d, dtype=torch.float32).to(device)
+    radial_bin_edges_tensor = torch.tensor(radial_bin_edges, dtype=torch.float32).to(device)
 
-        # Convert numpy arrays to PyTorch tensors
-        motion_vectors_2d_tensor = torch.tensor(motion_vectors_2d, dtype=torch.float32).to(device)
-        radial_bin_edges_tensor = torch.tensor(radial_bin_edges, dtype=torch.float32).to(device)
+    # Prepare for bootstrapping
+    cmn_phase_selection_tensor = torch.Tensor(cmn_phase_selection).bool().to(device)
+    signal_within_cmn_selection_tensor = torch.Tensor(signal_within_cmn_selection).bool().to(device)
+    # Create output tensor
+    bs_radial_bin_etas_tensor = torch.zeros((bootstrap_num, *radial_bin_etas.shape), dtype=torch.float32).to(device)
+    for i in range(bootstrap_num):
+        # Circularly permutate signal
+        perm_signal_selection = torch.roll(signal_within_cmn_selection_tensor, frame_shifts[i])
 
-        # Prepare for bootstrapping
-        cmn_phase_selection_tensor = torch.Tensor(cmn_phase_selection).bool().to(device)
-        signal_within_cmn_selection_tensor = torch.Tensor(signal_within_cmn_selection).bool().to(device)
-        # Create output tensor
-        bs_radial_bin_etas_tensor = torch.zeros((bootstrap_num, *radial_bin_etas.shape), dtype=torch.float32).to(device)
-        for i in range(bootstrap_num):
-            # Circularly permutate signal
-            perm_signal_selection = torch.roll(signal_within_cmn_selection_tensor, frame_shifts[i])
+        # Get motion vectors of permutated signal
+        bs_motion_vectors_tensor = motion_vectors_2d_tensor[cmn_phase_selection_tensor][perm_signal_selection]
 
-            # Get motion vectors of permutated signal
-            bs_motion_vectors_tensor = motion_vectors_2d_tensor[cmn_phase_selection_tensor][perm_signal_selection]
+        # Calculate vector ETAs for each local radial bin
+        _, bs_bin_etas = calculate_local_directions_torch(bs_motion_vectors_tensor, radial_bin_edges_tensor)
 
-            # Calculate vector ETAs for each local radial bin
-            _, bs_bin_etas = calculate_local_directions_torch(bs_motion_vectors_tensor, radial_bin_edges_tensor)
+        # Save ETAs
+        bs_radial_bin_etas_tensor[i] = bs_bin_etas
 
-            # Save ETAs
-            bs_radial_bin_etas_tensor[i] = bs_bin_etas
+    # Copy resulting output tensor back to CPU and convert to numpy
+    bs_radial_bin_etas = bs_radial_bin_etas_tensor.cpu().numpy()
 
-        # Copy resulting output tensor back to CPU and convert to numpy
-        bs_radial_bin_etas = bs_radial_bin_etas_tensor.cpu().numpy()
-
-    else:
-
-        for i in range(bootstrap_num):
-            # Circularly permutate signal
-            perm_signal_selection = np.roll(signal_within_cmn_selection, frame_shifts[i])
-
-            # Get motion vectors of permutated signal
-            bs_motion_vectors = motion_vectors_2d[cmn_phase_selection][perm_signal_selection]
-
-            # Calculate vector ETAs for each local radial bin
-            bs_radial_bin_etas[i] = calculate_local_directions(bs_motion_vectors, radial_bin_edges)[1]
+    # else:
+    #
+    #     for i in range(bootstrap_num):
+    #         # Circularly permutate signal
+    #         perm_signal_selection = np.roll(signal_within_cmn_selection, frame_shifts[i])
+    #
+    #         # Get motion vectors of permutated signal
+    #         bs_motion_vectors = motion_vectors_2d[cmn_phase_selection][perm_signal_selection]
+    #
+    #         # Calculate vector ETAs for each local radial bin
+    #         bs_radial_bin_etas[i] = calculate_local_directions(bs_motion_vectors, radial_bin_edges)[1]
 
     # Save bootstrapped ETAs
     roi[f'bs_radial_bin_etas{postfix}'] = bs_radial_bin_etas
@@ -432,14 +404,6 @@ def run_2step_ncb_test(roi: Roi,
                        cluster_alpha: float = 0.05,
                        sign_radial_bin_threshold: int = 1,
                        postfix: str = ''):
-
-    # TODO: temporary to deal with incomplete entities (ingest problem)
-    if (
-            'metadata/repeat_num' not in roi.recording
-            or 'ca_times' not in roi.recording
-            or 'dff' not in roi
-    ):
-        return
 
     # Roi
     radial_bin_etas = roi[f'radial_bin_etas{postfix}']
@@ -589,14 +553,6 @@ def _calc_preferred_directions(bin_etas: np.ndarray, bin_significances: np.ndarr
 
 def calculate_egomotion_similarities(roi: Roi, postfix: str = ''):
     """"""
-
-    # TODO: temporary to deal with incomplete entities (ingest problem)
-    if (
-            'metadata/repeat_num' not in roi.recording
-            or 'ca_times' not in roi.recording
-            or 'dff' not in roi
-    ):
-        return
 
 
     if not roi[f'has_receptive_field{postfix}']:
