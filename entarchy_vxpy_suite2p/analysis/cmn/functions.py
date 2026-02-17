@@ -782,3 +782,175 @@ def _trace_cluster(current_patch_idx: int,
                        sign_radial_bin_threshold,
                        cluster_map,
                        visited_patch_indices)
+
+#
+# ## TEMP, test all-in-one
+#
+# def run_cmn_analysis(roi: Roi,
+#                      bootstrap_num: int = 1000,
+#                      bernoulli_alpha: float = 0.05,
+#                      sign_radial_bin_threshold: int = 1,
+#                      cluster_alpha: float = 0.05,
+#                      save_debug_data: bool = False,
+#                      _use_gpu_device: str = None):
+#
+#     device = _use_gpu_device
+#     if device is None:
+#         device = 'cpu'
+#
+#     # ROI data
+#     signal_selection = roi['signal_selection']
+#
+#     # Recording data
+#     sample_rate = roi.recording['sample_rate']
+#     radial_bin_centers = roi.recording['radial_bin_centers']
+#     radial_bin_edges = roi.recording['radial_bin_edges']
+#     motion_vectors_2d = roi.layer['cmn_motion_vectors_2d']
+#     cmn_phase_selection = roi.layer['cmn_phase_selection']
+#
+#     radial_bin_norms, radial_bin_etas = calculate_local_directions(motion_vectors_2d[signal_selection],
+#                                                                    radial_bin_edges)
+#
+#     # Select motion matrix based on circularly permutated signal
+#     min_frame_shift = 4 * sample_rate
+#     max_frame_shift = int(cmn_phase_selection.sum() - min_frame_shift)
+#     frame_shifts = np.random.randint(min_frame_shift, max_frame_shift, size=(bootstrap_num,))
+#     signal_within_cmn_selection = signal_selection[cmn_phase_selection]
+#
+#     # Convert numpy arrays to PyTorch tensors
+#     motion_vectors_2d_tensor = torch.tensor(motion_vectors_2d, dtype=torch.float32).to(device)
+#     radial_bin_edges_tensor = torch.tensor(radial_bin_edges, dtype=torch.float32).to(device)
+#
+#     # Prepare for bootstrapping
+#     cmn_phase_selection_tensor = torch.Tensor(cmn_phase_selection).bool().to(device)
+#     signal_within_cmn_selection_tensor = torch.Tensor(signal_within_cmn_selection).bool().to(device)
+#     # Create output tensor
+#     bs_radial_bin_etas_tensor = torch.zeros((bootstrap_num, *radial_bin_etas.shape), dtype=torch.float32).to(device)
+#     for i in range(bootstrap_num):
+#         # Circularly permutate signal
+#         perm_signal_selection = torch.roll(signal_within_cmn_selection_tensor, frame_shifts[i])
+#
+#         # Get motion vectors of permutated signal
+#         bs_motion_vectors_tensor = motion_vectors_2d_tensor[cmn_phase_selection_tensor][perm_signal_selection]
+#
+#         # Calculate vector ETAs for each local radial bin
+#         _, bs_bin_etas = calculate_local_directions_torch(bs_motion_vectors_tensor, radial_bin_edges_tensor)
+#
+#         # Save ETAs
+#         bs_radial_bin_etas_tensor[i] = bs_bin_etas
+#
+#     # Copy resulting output tensor back to CPU and convert to numpy
+#     bs_radial_bin_etas = bs_radial_bin_etas_tensor.cpu().numpy()
+#
+#     if save_debug_data:
+#         roi['radial_bin_etas'] = radial_bin_etas
+#         roi['bs_radial_bin_etas'] = bs_radial_bin_etas
+#
+#     # Calculate ETA significances (1st bootstrap)
+#
+#     # For original ETAs
+#     cdf_values = ((radial_bin_etas > bs_radial_bin_etas).sum(axis=0) / bootstrap_num)
+#     greater_than = cdf_values > 1 - bernoulli_alpha / 2
+#     less_than = cdf_values < bernoulli_alpha / 2
+#     radial_bin_p_values = cdf_values.copy()
+#     radial_bin_p_values[greater_than] = 1 - cdf_values[greater_than]
+#
+#     radial_bin_significances = np.zeros_like(radial_bin_p_values, dtype=np.int8)
+#     radial_bin_significances[greater_than] = 1
+#     radial_bin_significances[less_than] = -1
+#
+#     roi['radial_bin_significances'] = radial_bin_significances
+#
+#     #  For bootstrapped ETAs
+#     bs_radial_bin_significances = np.zeros_like(bs_radial_bin_etas, dtype=np.int8)
+#     bs_radial_bin_p_values = np.zeros_like(bs_radial_bin_etas)
+#     for bs_idx in range(bootstrap_num):
+#         bs_etas = bs_radial_bin_etas[bs_idx]
+#
+#         cdf_values = (bs_etas > bs_radial_bin_etas).sum(axis=0) / bootstrap_num
+#         greater_than = cdf_values > 1 - bernoulli_alpha / 2
+#         less_than = cdf_values < bernoulli_alpha / 2
+#         p_values = cdf_values.copy()
+#         p_values[greater_than] = 1 - cdf_values[greater_than]
+#
+#         significances = np.zeros_like(p_values)
+#         significances[greater_than] = 1
+#         significances[less_than] = -1
+#
+#         # Save results
+#         bs_radial_bin_p_values[bs_idx] = p_values
+#         bs_radial_bin_significances[bs_idx] = significances
+#
+#     if save_debug_data:
+#         roi['bs_radial_bin_p_values'] = bs_radial_bin_p_values
+#         roi['bs_radial_bin_significances'] = bs_radial_bin_significances
+#         roi['radial_bin_p_values'] = radial_bin_p_values
+#         roi['radial_bin_significances'] = radial_bin_significances
+#
+#     # For original ETA
+#     vecs = _calc_preferred_directions(radial_bin_etas, radial_bin_significances > 0, radial_bin_centers)
+#     roi['preferred_vectors'] = vecs
+#
+#     # For Bootstrapped ETAs
+#     bs_vecs = np.zeros(bs_radial_bin_etas.shape[:2] + (2,))
+#     for bs_idx in range(bs_radial_bin_etas.shape[0]):
+#         bs_vecs[bs_idx] = _calc_preferred_directions(bs_radial_bin_etas[bs_idx],
+#                                                      bs_radial_bin_significances[bs_idx] > 0,
+#                                                      radial_bin_centers)
+#
+#     # Get data
+#     closest_3_position_idcs = roi.recording['clostest_3_position_indices']
+#
+#     # BS data
+#
+#     # Trace clusters in original signal
+#     _, cluster_full_indices, unique_indices = create_clusters(radial_bin_significances > 0,
+#                                                               closest_3_position_idcs,
+#                                                               sign_radial_bin_threshold)
+#     roi['cluster_full_indices'] = cluster_full_indices
+#     roi['cluster_unique_patch_indices'] = unique_indices
+#
+#     # Trace clusters in bootstrapped signals
+#     bs_cluster_full_indices = []
+#     bs_cluster_unique_indices = []
+#     for bs_idx in range(bootstrap_num):
+#         _, full_indices, unique_indices = create_clusters(bs_radial_bin_significances[bs_idx] > 0,
+#                                                           closest_3_position_idcs,
+#                                                           sign_radial_bin_threshold)
+#         bs_cluster_full_indices.append(full_indices)
+#         bs_cluster_unique_indices.append(unique_indices)
+#
+#     roi['bs_cluster_full_indices'] = bs_cluster_full_indices
+#     roi['bs_cluster_unique_patch_indices'] = bs_cluster_unique_indices
+#
+#     # Calculate cluster significances (2nd bootstrap)
+#
+#     # Convert to float
+#     radial_bin_significances_float = (radial_bin_significances > 0).astype(np.float64)
+#     bs_radial_bin_significances_float = (bs_radial_bin_significances > 0).astype(np.float64)
+#
+#     # For bootstrapped clusters
+#     bs_max_cluster_scores = np.zeros(bootstrap_num)
+#     for bs_idx in range(bootstrap_num):
+#         bs_indices = bs_cluster_full_indices[bs_idx]
+#         bs_significances = bs_radial_bin_significances_float[bs_idx]
+#
+#         # Calculate largest sum of scores for all clusters
+#         _scores = [bs_significances[tuple(_idcs.T)].sum() for _idcs in bs_indices]
+#         bs_max_cluster_scores[bs_idx] = np.max(_scores) if len(_scores) > 0 else 0
+#
+#     # Check significance of cluster scores in original ETA
+#     _scores = [radial_bin_significances_float[tuple(_idcs.T)].sum() for _idcs in cluster_full_indices]
+#     original_cluster_scores = np.array(_scores)
+#
+#     # counts, bins, patches = plt.hist(bs_max_cluster_scores, bins=50)
+#     # plt.vlines(original_cluster_scores, 0, counts.max(), color='red')
+#     # plt.show()
+#
+#     cluster_significances = ((original_cluster_scores >= bs_max_cluster_scores[:, None]).sum(axis=0)
+#                              / bootstrap_num > (1 - cluster_alpha))
+#     cluster_significant_indices = np.where(cluster_significances)[0]
+#
+#     # Save results
+#     roi['cluster_significant_indices'] = cluster_significant_indices
+#     roi['has_receptive_field'] = len(cluster_significant_indices) > 0

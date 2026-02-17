@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 import pathlib
-from typing import Callable
+from typing import Callable, TypeVar, cast
 
 import h5py
 import numpy as np
@@ -17,41 +17,9 @@ import entarchy
 __all__ = ['Animal', 'Recording', 'Layer', 'Roi', 'Phase', 'Suite2PVxPy']
 
 
-
-# TODO: replace scipy here, it's overkill and only used twice
-
-# Frame time calculation methods
-
-def ca_frame_times_from_y_mirror(mirror_position: np.ndarray, mirror_time: np.ndarray):
-    peak_prominence = (mirror_position.max() - mirror_position.min()) / 4
-    peak_idcs, _ = scipy.signal.find_peaks(mirror_position, prominence=peak_prominence)
-    trough_idcs, _ = scipy.signal.find_peaks(-mirror_position, prominence=peak_prominence)
-
-    # Find first trough
-    first_peak = peak_idcs[0]
-    first_trough = trough_idcs[trough_idcs < first_peak][-1]
-
-    # Discard all before (and including) first trough
-    trough_idcs = trough_idcs[first_trough < trough_idcs]
-    frame_idcs = np.sort(np.concatenate([trough_idcs, peak_idcs]))
-
-    # Get corresponding times
-    frame_times = mirror_time[frame_idcs]
-
-    return frame_idcs, frame_times
-
-
-def ca_frame_times_from_sync_toggle(sync_signal: np.ndarray, sync_time: np.ndarray):
-    frame_indices = np.where(np.diff(sync_signal) > 0)
-    frame_times = sync_time[frame_indices]
-
-    return frame_indices, frame_times
-
-
-frame_time_methods = {
-    'y_mirror': ca_frame_times_from_y_mirror,
-    'frame_sync_toggle': ca_frame_times_from_sync_toggle,
-}
+# C = TypeVar("C", bound=entarchy.Collection)
+# def get_collection_as(ent: entarchy.Entarchy, entity_type: type[entarchy.Entity], *expr, **kw) -> C:
+#     return cast(C, ent.get(entity_type, *expr, **kw))
 
 
 class AnimalCollection(entarchy.Collection):
@@ -79,33 +47,33 @@ class Animal(entarchy.Entity):
 
     @property
     def recordings(self) -> RecordingCollection:
-        return self.entarchy.get(Recording, f'[Animal]uuid == "{self.uuid}"')  # type: ignore
+        return self.entarchy.get(Recording, f'[Animal]uuid == "{self.uuid}"')  # type: ignore[return-value]
 
     @property
     def rois(self) -> RoiCollection:
-        return self.entarchy.get(Roi, f'[Animal]uuid == "{self.uuid}"')  # type: ignore
+        return self.entarchy.get(Roi, f'[Animal]uuid == "{self.uuid}"')  # type: ignore[return-value]
 
 
 class Recording(entarchy.Entity):
     collection_type = RecordingCollection
     # # Child entity types may be added by name meta // Does not work yet
-    # _child_entity_types = ['Roi', 'Phase']
+    # _child_entity_types = [Roi, Phase]
 
     @property
     def animal(self) -> Animal:
-        return self.parent # type: ignore
+        return self.parent  # type: ignore[return-value]
 
     @property
     def phases(self) -> PhaseCollection:
-        return self.entarchy.get(Phase, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
+        return self.entarchy.get(Phase, f'[Recording]uuid == "{self.uuid}"')  # type: ignore[return-value]
 
     @property
     def layers(self) -> LayerCollection:
-        return self.entarchy.get(Layer, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
+        return self.entarchy.get(Layer, f'[Recording]uuid == "{self.uuid}"')  # type: ignore[return-value]
 
     @property
     def rois(self) -> RoiCollection:
-        return self.entarchy.get(Roi, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
+        return self.entarchy.get(Roi, f'[Recording]uuid == "{self.uuid}"')  # type: ignore[return-value]
 
 
 class Phase(entarchy.Entity):
@@ -113,27 +81,28 @@ class Phase(entarchy.Entity):
 
     @property
     def recording(self) -> Recording:
-        return self.parent # type: ignore
+        return self.parent  # type: ignore[return-value]
 
     @property
     def animal(self) -> Animal:
-        return self.recording.parent # type: ignore
+        return self.recording.parent  # type: ignore[return-value]
 
 
 class Layer(entarchy.Entity):
     collection_type = LayerCollection
 
     @property
-    def rois(self):
-        return self.entarchy.get(Roi, f'[Recording]uuid == "{self.uuid}"')  # type: ignore
+    def rois(self) -> RoiCollection:
+        return self.entarchy.get(Roi, f'[Recording]uuid == "{self.uuid}"')  # type: ignore[return-value]
+        # return get_collection_as[RoiCollection](self.entarchy, Roi, f'[Recording]uuid == "{self.uuid}"')
 
     @property
     def recording(self) -> Recording:
-        return self.parent  # type: ignore
+        return self.parent  # type: ignore[return-value]
 
     @property
     def animal(self) -> Animal:
-        return self.recording.animal  # type: ignore
+        return self.recording.animal  # type: ignore[return-value]
 
 
 class Roi(entarchy.Entity):
@@ -141,11 +110,15 @@ class Roi(entarchy.Entity):
 
     @property
     def layer(self) -> Layer:
-        return self.parent  # type: ignore
+        return self.parent  # type: ignore[return-value]
 
     @property
     def recording(self) -> Recording:
-        return self.layer.recording  # type: ignore
+        return self.layer.recording  # type: ignore[return-value]
+
+    @property
+    def animal(self) -> Animal:
+        return self.recording.animal  # type: ignore[return-value]
 
 
 # Child entity types may be added by method calls
@@ -617,6 +590,42 @@ def unravel_dict(dict_data: dict, entity: entarchy.Entity, path: str):
             unravel_dict(item, entity, f'{path}/{key}')
             continue
         entity[f'{path}/{key}'] = item
+
+
+# TODO: replace scipy here, it's overkill and only used twice
+
+# Frame time calculation methods
+
+def ca_frame_times_from_y_mirror(mirror_position: np.ndarray, mirror_time: np.ndarray):
+    peak_prominence = (mirror_position.max() - mirror_position.min()) / 4
+    peak_idcs, _ = scipy.signal.find_peaks(mirror_position, prominence=peak_prominence)
+    trough_idcs, _ = scipy.signal.find_peaks(-mirror_position, prominence=peak_prominence)
+
+    # Find first trough
+    first_peak = peak_idcs[0]
+    first_trough = trough_idcs[trough_idcs < first_peak][-1]
+
+    # Discard all before (and including) first trough
+    trough_idcs = trough_idcs[first_trough < trough_idcs]
+    frame_idcs = np.sort(np.concatenate([trough_idcs, peak_idcs]))
+
+    # Get corresponding times
+    frame_times = mirror_time[frame_idcs]
+
+    return frame_idcs, frame_times
+
+
+def ca_frame_times_from_sync_toggle(sync_signal: np.ndarray, sync_time: np.ndarray):
+    frame_indices = np.where(np.diff(sync_signal) > 0)
+    frame_times = sync_time[frame_indices]
+
+    return frame_indices, frame_times
+
+
+frame_time_methods = {
+    'y_mirror': ca_frame_times_from_y_mirror,
+    'frame_sync_toggle': ca_frame_times_from_sync_toggle,
+}
 
 
 if __name__ == '__main__':
