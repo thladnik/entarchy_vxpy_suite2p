@@ -14,11 +14,13 @@ import yaml
 import entarchy
 
 
-__all__ = ['Animal', 'Recording', 'Layer', 'Roi', 'Phase', 'Suite2PVxPy']
+__all__ = ['Suite2PVxPy',
+           'Animal', 'Recording', 'Layer', 'Roi', 'Phase',
+           'AnimalCollection', 'RecordingCollection', 'LayerCollection', 'RoiCollection', 'PhaseCollection']
 
 
-# C = TypeVar("C", bound=entarchy.Collection)
-# def get_collection_as(ent: entarchy.Entarchy, entity_type: type[entarchy.Entity], *expr, **kw) -> C:
+# C = TypeVar("C", bound=schema.Collection)
+# def get_collection_as(ent: schema.Entarchy, entity_type: type[schema.Entity], *expr, **kw) -> C:
 #     return cast(C, ent.get(entity_type, *expr, **kw))
 
 
@@ -93,8 +95,8 @@ class Layer(entarchy.Entity):
 
     @property
     def rois(self) -> RoiCollection:
-        return self.entarchy.get(Roi, f'[Recording]uuid == "{self.uuid}"')  # type: ignore[return-value]
-        # return get_collection_as[RoiCollection](self.entarchy, Roi, f'[Recording]uuid == "{self.uuid}"')
+        return self.entarchy.get(Roi, f'[Layer]uuid == "{self.uuid}"')  # type: ignore[return-value]
+        # return get_collection_as[RoiCollection](self.schema, Roi, f'[Recording]uuid == "{self.uuid}"')
 
     @property
     def recording(self) -> Recording:
@@ -130,12 +132,13 @@ Recording.add_child_entity_type(Phase)
 
 class Suite2PVxPy(entarchy.Entarchy):
 
-    implementation_version = '0.2'
+    _implementation_compat_version_list = ['0.2']
+    _implementation_version = '0.2'
 
-    _hierarchy_root = Animal
+    _hierarchy_root_type = Animal
 
     @entarchy.digest_method
-    def add_animal(self, path: str) -> Animal:
+    def add_animal(self, path: str, use_anatomy_reference: str = None) -> Animal:
 
         path = pathlib.Path(path).as_posix()
 
@@ -188,6 +191,11 @@ class Suite2PVxPy(entarchy.Entarchy):
         if 'ants_registration' in os.listdir(path):
             for mov_folder in os.listdir(os.path.join(path, 'ants_registration')):
                 for ref_folder in os.listdir(os.path.join(path, 'ants_registration', mov_folder)):
+
+                    # Skip if user specified a particular reference name
+                    if use_anatomy_reference is not None and use_anatomy_reference not in ref_folder:
+                        continue
+
                     reg_path = os.path.join(path, 'ants_registration', mov_folder, ref_folder)
 
                     # If there is a transform file, we'll take it
@@ -469,7 +477,52 @@ class Suite2PVxPy(entarchy.Entarchy):
 
         return recording
 
-    # @entarchy.digest_method
+    @entarchy.digest_method
+    def update_roi_coordinates_from_registration(self, recording_path: str):
+        """
+        Function to update coordinates of the ROIs from a given recording path
+        """
+
+        # Find recordings based on path
+        parts = pathlib.Path(recording_path).as_posix().split('/')
+        recording = self.get(Recording, f'[Animal]id == "{parts[-2]}" AND id == "{parts[-1]}"')[0]
+
+        # Find all layers in suite2p folder
+        layer_names = []
+        for _name in os.listdir(os.path.join(recording_path, 'suite2p')):
+            if (not os.path.isdir(os.path.join(recording_path, 'suite2p', _name))
+                    or not _name.startswith('plane')):
+                continue
+            layer_names.append(_name)
+
+        for layer_n in layer_names:
+
+            layer = self.get(Layer, f'id == "{layer_n}" and [Recording]uuid == "{recording.uuid}"')
+
+            roi_coordinates = None
+            if 'ants_registration' in os.listdir(os.path.join(recording_path, 'suite2p')):
+                # Check for registration data in each registration subfolder for current plane
+                for fld in os.listdir(os.path.join(recording_path, 'suite2p', 'ants_registration', layer_n)):
+                    registration_path = os.path.join(recording_path, 'suite2p', 'ants_registration', layer_n, fld)
+
+                    # Read coordinates of available
+                    if 'mapped_points.h5' in os.listdir(registration_path):
+                        roi_coordinates = pd.read_hdf(os.path.join(registration_path, 'mapped_points.h5'),
+                                                      key='coordinates')
+
+                        print(f'Found ANTs registration data for  ROI coordinates in {layer}: {registration_path}')
+                        break
+
+            if roi_coordinates is None:
+                print('WARNING: no ANTs registration data found')
+                return
+
+            # Update ROI coordiantes
+            rois = layer.rois
+            for k in ['x', 'y', 'z']:
+                rois[f'ants/{k}'] = rois['index'].apply(lambda idx: roi_coordinates.iloc[idx][k])
+
+    # @schema.digest_method
     # def test_digest(self) -> None:
     #
     #     import random

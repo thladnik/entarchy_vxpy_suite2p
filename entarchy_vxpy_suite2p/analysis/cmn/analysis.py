@@ -1,11 +1,11 @@
 import numpy as np
 import pandas as pd
 import tifffile
+import alive_progress
 
 import entarchy
-from entarchy import backend
 
-# Import entarchy and types
+# Import schema and types
 from ... import *
 
 from . import functions
@@ -13,6 +13,8 @@ from . import helper
 
 
 def create(analysis_path: str, recreate: bool = False, **kwargs):
+
+    from entarchy import backend
 
     # Delete analysis
     if recreate:
@@ -62,7 +64,7 @@ def run(analysis_path: str):
     (ent.get(Roi, 'NOT(EXIST(signal_dff_mean))')
      .map_async(functions.detect_events_with_derivative))
 
-    (ent.get(Roi, 'NOT(EXIST(bs_radial_bin_etas))') #  AND rotation_autocorrelation > 0.7
+    (ent.get(Roi, 'NOT(EXIST(bs_radial_bin_etas))')
      .map_async(functions.calculate_reverse_correlations, worker_num=5, bootstrap_num=1000, use_gpu=True))
 
     (ent.get(Roi).where('NOT(EXIST(has_receptive_field))')
@@ -73,72 +75,75 @@ def run(analysis_path: str):
      .map_async(functions.calculate_egomotion_similarities))
 
 
-def postprocessing(analysis_path: str):
+def postprocessing(ent: entarchy.Entarchy):
 
-    analysis = caload.analysis.open_analysis(analysis_path)
+    with (alive_progress.alive_bar(force_tty=True, total=8) as bar):
 
-    cmn_rois = analysis.get(Roi, 'has_receptive_field == True')
-    df = cmn_rois.dataframe
+        cmn_rois = ent.get(Roi, 'has_receptive_field == True')
 
-    # Calculate indices
-    df['motion_selectivity_index'] = (
-            (df['translation_best_similarity'] - df['rotation_best_similarity']) / (
-            df['translation_best_similarity'] + df['rotation_best_similarity']))
+        # # Calculate indices
+        cmn_rois['motion_selectivity_index'] = (
+                (cmn_rois['translation_best_similarity'] - cmn_rois['rotation_best_similarity']) /
+                (cmn_rois['translation_best_similarity'] + cmn_rois['rotation_best_similarity']))
+        bar()
 
-    # Calculate other stuff
-    df['1_minus_rotation_similarity'] = 1 - df['rotation_best_similarity']
-    df['1_minus_translation_similarity'] = 1 - df['translation_best_similarity']
+        # Calculate other stuff
+        cmn_rois['1_minus_rotation_similarity'] = 1 - cmn_rois['rotation_best_similarity']
+        cmn_rois['1_minus_translation_similarity'] = 1 - cmn_rois['translation_best_similarity']
+        bar()
 
-    df['cluster_significant_num'] = df['cluster_significant_indices'].apply(lambda x: len(x))
+        cmn_rois['cluster_significant_num'] = cmn_rois['cluster_significant_indices'].apply(lambda x: len(x))
+        bar()
 
-    df.commit()
+        # Add convencience access to properties
+        def _unpack_indices(series: pd.Series):
+            _patch_idcs = []
+            for _cluster_idx in series['cluster_significant_indices']:
+                _patch_idcs.extend(series['cluster_unique_patch_indices'][_cluster_idx])
+            return len(_patch_idcs)
+            # return _patch_idcs
 
-    # Add convencience access to properties
-    def _unpack_indices(series: pd.Series):
-        _patch_idcs = []
-        for _cluster_idx in series['cluster_significant_indices']:
-            _patch_idcs.extend(series['cluster_unique_patch_indices'][_cluster_idx])
-        return _patch_idcs
+        patch_indices = cmn_rois[['cluster_significant_indices', 'cluster_unique_patch_indices']].apply(_unpack_indices, axis=1)
+        cmn_rois['rf_significant_patch_num'] = patch_indices  # [len(idcs) for idcs in patch_indices]
+        bar()
 
-    sub_df = df['cluster_significant_indices', 'cluster_unique_patch_indices']
+        # Convert patch number to approx estimate of area
+        patch_centers = cmn_rois[0].recording['positions']
+        patch_num = patch_centers.shape[0]
+        cmn_rois['rf_size_sr'] = cmn_rois['rf_significant_patch_num'] * 4 * np.pi / patch_num
+        bar()
 
-    rf_significant_patch_indices = sub_df.apply(_unpack_indices, axis=1)
-    df['rf_significant_patch_num'] = [len(idcs) for idcs in rf_significant_patch_indices]
+        # Calculate response type based on mode number
+        cmn_rois['roi_response_type'] = cmn_rois['cluster_significant_num'].apply(lambda x: 'simple' if x == 1 else 'complex')
+        bar()
 
-    # Convert patch number to approx estimate of area
-    patch_centers = cmn_rois[0].recording['positions']
-    patch_num = patch_centers.shape[0]
-    df['rf_size_sr'] = df['rf_significant_patch_num'] * 4 * np.pi / patch_num
+        # Calculate egomotion axes for all
+        cmn_rois['translation_axis_sph'] = cmn_rois['translation_axis'].apply(lambda v: helper.cart2sph(*v))
+        cmn_rois['translation_azimuth'] = cmn_rois[f'translation_axis_sph'].apply(lambda v: v[0])
+        cmn_rois['translation_elevation'] = cmn_rois[f'translation_axis_sph'].apply(lambda v: v[1])
+        bar()
 
-    # Calculate response type based on mode number
-    df['roi_response_type'] = df['cluster_significant_num'].apply(lambda x: 'simple' if x == 1 else 'complex')
+        cmn_rois['rotation_axis_sph'] = cmn_rois['rotation_axis'].apply(lambda v: helper.cart2sph(*v))
+        cmn_rois['rotation_azimuth'] = cmn_rois[f'rotation_axis_sph'].apply(lambda v: v[0])
+        cmn_rois['rotation_elevation'] = cmn_rois[f'rotation_axis_sph'].apply(lambda v: v[1])
 
-    df.commit()
-
-    # Calculate egomotion axes for all
-    df[f'translation_axis_sph'] = df[f'translation_axis'].apply(lambda v: helper.cart2sph(*v))
-    df[f'translation_azimuth'], df[f'translation_elevation'], _ = np.stack(df[f'translation_axis_sph'].values).T
-
-    df[f'rotation_axis_sph'] = df[f'rotation_axis'].apply(lambda v: helper.cart2sph(*v))
-    df[f'rotation_azimuth'], df[f'rotation_elevation'], _ = np.stack(df[f'rotation_axis_sph'].values).T
-
-    df.commit()
+        bar()
 
 
-def classify_brain_area(rois: RoiCollection, region_map: str, area_name: str):
+def are_rois_in_region(rois: RoiCollection, region_map: str):
 
-    def coordinates_in(sub_df: pd.DataFrame, voxel_volume: np.ndarray):
-        idcs = sub_df[['ants/x', 'ants/y', 'ants/z']].astype(int).values
-        return [voxel_volume[tuple(i)] > 0 for i in idcs]
+    def coordinates_in(region_data: np.ndarray):
+
+        def _coordinates_in(row: pd.Series):
+            return region_data[tuple(row[['ants/x', 'ants/y', 'ants/z']].astype(int).values)] > 0
+
+        return _coordinates_in
 
     # Load from tiff
     region_data = np.swapaxes(np.moveaxis(tifffile.imread(region_map), 0, 2), 0, 1)
 
-    # Check coordinates
-    df = rois.dataframe
-    df[f'is_in_{area_name}'] = coordinates_in(df, region_data)
-
-    df.commit()
+    # Write region flags
+    return rois[['ants/x', 'ants/y', 'ants/z']].apply(coordinates_in(region_data), axis=1)
 
 
 if __name__ == '__main__':
