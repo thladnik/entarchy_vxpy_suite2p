@@ -9,17 +9,16 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Polygon
 import scipy
 
-import caload
-from caload.schemata.ca_imaging_s2p_vxpy import *
+from ... import *
 import helper
-from functions import project_to_local_2d_vectors
+from .functions import project_to_local_2d_vectors
 
 colors_inh_exc = [(0 / 255, 0 / 255, 255 / 255), (150 / 255, 150 / 255, 150 / 255), (255 / 255, 0 / 255, 0 / 255)]
 nodes_inh_exc = [0.0, 0.5, 1.0]
 significance_cmap = LinearSegmentedColormap.from_list('blue_gray__red', list(zip(nodes_inh_exc, colors_inh_exc)))
 
 
-def plot_dffs(rois: caload.entities.EntityCollection,
+def plot_dffs(rois: RoiCollection,
               highlight: str = None, classification: bool = False, yscale: float = 1 / 4, yoffset = 0):
     highlight_values = None
     if highlight is not None:
@@ -63,7 +62,7 @@ def plot_dffs(rois: caload.entities.EntityCollection,
     plt.show()
 
 
-def plot_distribution(entities: caload.entities.EntityCollection, *attributes,
+def plot_distribution(entities, *attributes,
                       ax: plt.Axes = None, **kwargs):
     show = False
     if ax is None:
@@ -169,7 +168,7 @@ def plot_event_classification_debug(roi: Roi):
     axdff.plot(times, dffsignalout_thresh, '.', markersize=3., color='tab:orange')
 
 
-def plot_classifications(rois: caload.entities.EntityCollection):
+def plot_classifications(rois):
     fig, ax = plt.subplots(1, 1, figsize=(8, 12))
     i = 0
     for roi in rois:

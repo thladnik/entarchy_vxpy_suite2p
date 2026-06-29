@@ -83,8 +83,10 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
 
     # The stimulation protocol for this recording contains no CMN sitmuli? No need to process the CMN data
     if not any('CMN' in n for n in rec.phases['display/__visual_name'].values):
-        # print(f'No CMN in {rec}')
+        rec.rois['has_cmn_dataset'] = False
         return
+
+    rec.rois['has_cmn_dataset'] = True
 
     # Define up direction based on fish orientation during registration
     vertical_up_direction = np.array([0, 0, 1])
@@ -783,8 +785,7 @@ def _trace_cluster(current_patch_idx: int,
                        cluster_map,
                        visited_patch_indices)
 
-
-## TEMP, test all-in-one
+# test all-in-one
 
 def run_cmn_analysis(roi: Roi,
                      bootstrap_num: int = 1000,
@@ -792,13 +793,16 @@ def run_cmn_analysis(roi: Roi,
                      sign_radial_bin_threshold: int = 1,
                      cluster_alpha: float = 0.05,
                      save_debug_data: bool = False,
-                     _use_gpu_device: str = None):
+                     _use_gpu_device: str | None = None):
 
     device = _use_gpu_device
     if device is None:
         device = 'cpu'
 
+    print('>', device)
+
     # ROI data
+    detect_events_with_derivative(roi)
     signal_selection = roi['signal_selection']
 
     # Recording data

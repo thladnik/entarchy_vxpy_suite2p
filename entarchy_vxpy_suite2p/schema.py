@@ -52,6 +52,10 @@ class Animal(entarchy.Entity):
         return self.entarchy.get(Recording, f'[Animal]uuid == "{self.uuid}"')  # type: ignore[return-value]
 
     @property
+    def layers(self) -> LayerCollection:
+        return self.entarchy.get(Layer, f'[Animal]uuid == "{self.uuid}"')  # type: ignore[return-value]
+
+    @property
     def rois(self) -> RoiCollection:
         return self.entarchy.get(Roi, f'[Animal]uuid == "{self.uuid}"')  # type: ignore[return-value]
 
@@ -123,7 +127,7 @@ class Roi(entarchy.Entity):
         return self.recording.animal  # type: ignore[return-value]
 
 
-# Child entity types may be added by method calls
+# Establish hierarchy
 Animal.add_child_entity_type(Recording)
 Recording.add_child_entity_type(Layer)
 Layer.add_child_entity_type(Roi)

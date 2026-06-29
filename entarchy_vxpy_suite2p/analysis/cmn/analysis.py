@@ -45,14 +45,14 @@ def create(analysis_path: str, recreate: bool = False, **kwargs):
 #                                 frame_avg_num=frame_avg_num)
 
 
-def run(analysis_path: str):
-
-    ent = Suite2PVxPy(analysis_path)
+def run(ent: Suite2PVxPy):
 
     # Process recordings
     recordings = ent.get(Recording, 'NOT(EXIST(time_resampled))')
 
     recordings.map_async(functions.process_recording, sample_rate=10, radial_bin_num=16)
+
+    rois = ent.get(Roi) & 'has_cmn_dataset == True'
 
     # Process ROIs
     (ent.get(Roi, 'NOT(EXIST(dff))')
@@ -61,14 +61,17 @@ def run(analysis_path: str):
     (ent.get(Roi, 'NOT(EXIST(rotation_autocorrelation))')
      .map_async(functions.calculate_autocorrelations))
 
-    (ent.get(Roi, 'NOT(EXIST(signal_dff_mean))')
-     .map_async(functions.detect_events_with_derivative))
+    # (ent.get(Roi, 'NOT(EXIST(signal_dff_mean))')
+    #  .map_async(functions.detect_events_with_derivative))
+    #
+    # (ent.get(Roi, 'NOT(EXIST(bs_radial_bin_etas))')
+    #  .map_async(functions.calculate_reverse_correlations, worker_num=5, bootstrap_num=1000, use_gpu=True))
+    #
+    # (ent.get(Roi).where('NOT(EXIST(has_receptive_field))')
+    #  .map_async(functions.run_2step_ncb_test, bernoulli_alpha=0.05))
 
-    (ent.get(Roi, 'NOT(EXIST(bs_radial_bin_etas))')
-     .map_async(functions.calculate_reverse_correlations, worker_num=5, bootstrap_num=1000, use_gpu=True))
-
-    (ent.get(Roi).where('NOT(EXIST(has_receptive_field))')
-     .map_async(functions.run_2step_ncb_test, bernoulli_alpha=0.05))
+    # Run whole CMN analysis in one go
+    rois.where('NOT(EXIST(has_receptive_field))').map_async(functions.run_cmn_analysis, _worker_num=6, _use_gpu=True)
 
     # Select all ROIs that have RF and calculate similarity to egomotion templates
     (ent.get(Roi, '(has_receptive_field == True) AND NOT(EXIST(is_rotation_selective))')
@@ -79,7 +82,7 @@ def postprocessing(ent: entarchy.Entarchy):
 
     with (alive_progress.alive_bar(force_tty=True, total=8) as bar):
 
-        cmn_rois = ent.get(Roi, 'has_receptive_field == True')
+        cmn_rois = ent.get(Roi, 'has_cmn_dataset == True AND has_receptive_field == True')
 
         # # Calculate indices
         cmn_rois['motion_selectivity_index'] = (
