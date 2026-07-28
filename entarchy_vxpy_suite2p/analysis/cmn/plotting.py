@@ -10,7 +10,7 @@ from matplotlib.patches import Polygon
 import scipy
 
 from ... import *
-import helper
+from . import helper
 from .functions import project_to_local_2d_vectors
 
 colors_inh_exc = [(0 / 255, 0 / 255, 255 / 255), (150 / 255, 150 / 255, 150 / 255), (255 / 255, 0 / 255, 0 / 255)]
@@ -41,7 +41,9 @@ def plot_dffs(rois: RoiCollection,
         # dff = roi['dff'] * yscale
         times = roi.recording['time_resampled']
         dff = roi['dff_resampled']
-        times -= times[0]
+        # Copy on shift - the array returned by the entity is a live cache reference
+        #  and must not be mutated in place
+        times = times - times[0]
         ax.plot(times, yoffset + dff, color=np.ones(3) * colors[yoffset], linewidth=0.8)
         ax.annotate(str(roi), (-10, yoffset + 0.5), verticalalignment='center', horizontalalignment='right',
                     fontsize='xx-small')
@@ -50,7 +52,7 @@ def plot_dffs(rois: RoiCollection,
                         (times[-1] + 10, yoffset + 0.5),
                         verticalalignment='center', horizontalalignment='left', fontsize='xx-small')
 
-        if classification & roi['signal_length'] > 0:
+        if classification and roi['signal_length'] > 0:
             dff_masked = dff.copy()
             dff_masked[~roi['signal_selection']] = np.nan
             ax.plot(times, yoffset + dff_masked, color='red', linewidth=0.8)
