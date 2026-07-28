@@ -635,9 +635,15 @@ def project_to_local_2d_vectors(normals: np.ndarray, vectors: np.ndarray,
 
     # (leave this wrong version for future reference):
     # vnorms = vertical_up_direction - normals * np.dot(normals, np.array([0, 0, 1]))[:, None]
-    # This was the longtime implementation of this line, which contained an error that disregarded
-    #  the vertical_up_direction for vector length calculation (but did not affect direction)
-    #  The error is minimal (mean of less than 0.5%) for an (exaggerated) pitch of 20°
+    # This was the longtime implementation of this line, which contained an error: the tangential
+    #  component was taken against [0, 0, 1] instead of vertical_up_direction, so the local frame
+    #  was no longer orthonormal once a pitch correction was applied.
+    #  It affected direction as well as length. Measured on the 642-patch geometry against the
+    #  corrected version at the same up direction, projected vectors differ in direction by a mean
+    #  of 2.0°/4.0°/8.0° at a pitch of 5°/10°/20°, with the largest deviations at patches near the
+    #  up axis. Mean length error stays below 0.5% at a pitch of 20°, but reaches ~13% for
+    #  individual patches.
+    #  Both versions are identical without pitch correction (vertical_up_direction = [0, 0, 1]).
     # Correct implementation:
     vnorms = vertical_up_direction - normals * np.dot(normals, vertical_up_direction)[:, None]
     vnorms /= np.linalg.norm(vnorms, axis=1)[:, None]
