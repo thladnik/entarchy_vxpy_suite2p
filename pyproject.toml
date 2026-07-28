@@ -40,6 +40,8 @@ requires-python = ">=3.10"
 
 [project.optional-dependencies]
 cmn = [
+    'matplotlib',
+    'quaternionic',
     'scipy',
     'torch',
 ]
@@ -50,3 +52,7 @@ include = ['entarchy_vxpy_suite2p*']
 
 [project.urls]
 Homepage = 'https://github.com/thladnik/entarchy_vxpy_suite2p'
+
+[tool.pytest.ini_options]
+testpaths = ['tests']
+filterwarnings = ['ignore::DeprecationWarning:tifffile.*']
