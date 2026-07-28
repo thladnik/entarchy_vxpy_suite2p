@@ -633,7 +633,13 @@ def project_to_local_2d_vectors(normals: np.ndarray, vectors: np.ndarray,
     if not isinstance(vertical_up_direction, np.ndarray):
         vertical_up_direction = np.array(vertical_up_direction)
 
-    vnorms = vertical_up_direction - normals * np.dot(normals, np.array([0, 0, 1]))[:, None]
+    # (leave this wrong version for future reference):
+    # vnorms = vertical_up_direction - normals * np.dot(normals, np.array([0, 0, 1]))[:, None]
+    # This was the longtime implementation of this line, which contained an error that disregarded
+    #  the vertical_up_direction for vector length calculation (but did not affect direction)
+    #  The error is minimal (mean of less than 0.5%) for an (exaggerated) pitch of 20°
+    # Correct implementation:
+    vnorms = vertical_up_direction - normals * np.dot(normals, vertical_up_direction)[:, None]
     vnorms /= np.linalg.norm(vnorms, axis=1)[:, None]
 
     hnorms = -crossproduct(vnorms, normals)

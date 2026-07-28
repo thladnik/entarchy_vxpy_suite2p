@@ -42,11 +42,7 @@ class TestSphericalCoordinates:
 
 class TestRotationMatrix:
 
-    @pytest.mark.xfail(reason='rotmat_from_to rotates about cross(v2, v1), so it maps v2 onto v1 - '
-                              'the inverse of what its name and docstring promise. Currently unused '
-                              'in the codebase; fix by swapping the cross product arguments.',
-                       strict=True)
-    def test_rotates_v1_onto_v2_as_documented(self, rng):
+    def test_rotates_v1_onto_v2(self, rng):
         for _ in range(20):
             v1 = rng.normal(size=3)
             v2 = rng.normal(size=3)
@@ -56,16 +52,15 @@ class TestRotationMatrix:
             matrix = helper.rotmat_from_to(v1, v2)
             assert np.allclose(matrix @ v1, v2, atol=1e-8)
 
-    def test_current_behaviour_is_inverted(self, rng):
-        """Pins the actual behaviour so a future fix is a deliberate, visible change."""
-        for _ in range(20):
-            v1 = rng.normal(size=3)
-            v2 = rng.normal(size=3)
-            v1 /= np.linalg.norm(v1)
-            v2 /= np.linalg.norm(v2)
+    def test_direction_is_not_inverted(self, rng):
+        """Regression: the rotation axis used to be cross(v2, v1), which mapped
+        v2 onto v1 instead."""
+        v1 = np.array([1.0, 0.0, 0.0])
+        v2 = np.array([0.0, 1.0, 0.0])
 
-            matrix = helper.rotmat_from_to(v1, v2)
-            assert np.allclose(matrix @ v2, v1, atol=1e-8)
+        matrix = helper.rotmat_from_to(v1, v2)
+        assert np.allclose(matrix @ v1, v2, atol=1e-8)
+        assert not np.allclose(matrix @ v2, v1, atol=1e-8)
 
     def test_is_orthonormal(self, rng):
         v1, v2 = rng.normal(size=3), rng.normal(size=3)

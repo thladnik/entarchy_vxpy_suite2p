@@ -136,28 +136,25 @@ class TestLocalFrameOrthonormality:
         lengths = self.projected_lengths(unit_sphere_points)
         assert np.allclose(lengths, 1.0, atol=1e-6)
 
-    def test_current_behaviour_distorts_with_pitched_up(self, unit_sphere_points):
-        """Pins the current behaviour: with a pitch-corrected up direction the frame
-        is no longer orthonormal, so tangential vectors change length."""
-        lengths = self.projected_lengths(unit_sphere_points, self.pitched_up(20))
-        assert not np.allclose(lengths, 1.0, atol=1e-3)
-
-    def test_distortion_grows_with_pitch(self, unit_sphere_points):
-        errors = [np.abs(self.projected_lengths(unit_sphere_points, self.pitched_up(d)) - 1).max()
-                  for d in (0, 5, 10, 20)]
-        assert errors == sorted(errors)
-        assert errors[0] < 1e-6      # no pitch -> no distortion
-        assert errors[-1] > 0.01     # 20 degrees -> percent-level distortion
-
-    @pytest.mark.xfail(reason='project_to_local_2d_vectors computes the tangential component of '
-                              'the up direction using dot(normals, [0,0,1]) instead of '
-                              'dot(normals, vertical_up_direction). The two agree only for the '
-                              'default up direction, so recordings with ants/init_x_rotation set '
-                              'get a skewed, non-orthonormal local frame.',
-                       strict=True)
-    def test_pitched_up_direction_should_stay_orthonormal(self, unit_sphere_points):
-        lengths = self.projected_lengths(unit_sphere_points, self.pitched_up(20))
+    @pytest.mark.parametrize('pitch_degrees', [0, 5, 10, 20, 30])
+    def test_pitched_up_direction_stays_orthonormal(self, unit_sphere_points, pitch_degrees):
+        """Regression: the tangential component of the up direction used to be
+        computed against [0,0,1] rather than the up direction itself, which left
+        the frame non-orthonormal whenever ants/init_x_rotation was set."""
+        lengths = self.projected_lengths(unit_sphere_points, self.pitched_up(pitch_degrees))
         assert np.allclose(lengths, 1.0, atol=1e-6)
+
+    def test_local_axes_are_orthogonal_to_the_patch_normal(self, unit_sphere_points):
+        """A vector along the patch normal must have no local 2d component, whatever
+        the up direction."""
+        up = self.pitched_up(20)
+        normals, _ = self.tangent_vectors(unit_sphere_points)
+
+        with np.errstate(invalid='ignore'):
+            projected = functions.project_to_local_2d_vectors(normals, normals[None, :, :], up)[0]
+
+        finite = np.isfinite(projected).all(axis=1)
+        assert np.allclose(projected[finite], 0.0, atol=1e-6)
 
 
 class TestCalculateLocalDirections:

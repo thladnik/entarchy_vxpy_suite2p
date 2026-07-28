@@ -49,7 +49,7 @@ def rotmat_from_to(v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
     v1n = v1 / np.linalg.norm(v1)
     v2n = v2 / np.linalg.norm(v2)
 
-    basis = np.cross(v2n, v1n)
+    basis = np.cross(v1n, v2n)
     basis /= np.linalg.norm(basis)
     angle = np.arccos(np.dot(v1n, v2n))
 
