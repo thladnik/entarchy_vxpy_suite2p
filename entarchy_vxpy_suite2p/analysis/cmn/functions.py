@@ -1,5 +1,7 @@
-import pandas as pd
+import warnings
 from typing import List, Tuple, Union
+
+import pandas as pd
 
 import numpy as np
 import scipy
@@ -11,26 +13,69 @@ from . import helper
 from ... import *
 
 
+# Number of sliding windows evaluated at once in calculate_dff. Larger values are
+#  marginally faster but hold chunk x window_size floats in memory at a time.
+DFF_WINDOW_CHUNK = 512
+
+
+def rolling_baseline(fluorescence: np.ndarray, window_size: int, percentile: int,
+                     chunk_size: int = DFF_WINDOW_CHUNK) -> np.ndarray:
+    """Baseline per sample: the mean of the values below the given percentile of a
+    centred window.
+
+    Evaluates all windows with array operations instead of looping over samples,
+    which is several times faster for the window sizes used here (a 120 s window at
+    10 Hz spans 1200 samples). Windows are processed in chunks, so peak memory stays
+    at chunk_size x window_size regardless of recording length.
+    """
+
+    if window_size % 2 == 0:
+        window_size += 1
+    half_window_size = (window_size - 1) // 2
+
+    # Pad with the median of the first/last half window, so edge samples get a
+    #  full-width window
+    padded = np.pad(fluorescence, half_window_size, mode='empty')
+    padded[:half_window_size] = np.median(fluorescence[:half_window_size])
+    padded[-half_window_size:] = np.median(fluorescence[-half_window_size:])
+
+    windows = np.lib.stride_tricks.sliding_window_view(padded, window_size)[:fluorescence.shape[0]]
+
+    baseline = np.empty(fluorescence.shape[0], dtype=np.float64)
+    undefined = 0
+    for start in range(0, windows.shape[0], chunk_size):
+        block = windows[start:start + chunk_size]
+
+        threshold = np.percentile(block, percentile, axis=1)
+        below = block < threshold[:, None]
+        counts = below.sum(axis=1)
+        undefined += int((counts == 0).sum())
+
+        # Where no sample falls below the percentile (a flat stretch of trace) the
+        #  baseline is undefined and comes out as nan, as it did when the previous
+        #  implementation averaged an empty slice
+        with np.errstate(invalid='ignore'):
+            baseline[start:start + chunk_size] = (block * below).sum(axis=1) / counts
+
+    if undefined > 0:
+        warnings.warn(f'Baseline undefined for {undefined} of {fluorescence.shape[0]} samples: '
+                      f'no value lies below the {percentile}th percentile of the window, which '
+                      f'happens for a perfectly flat trace. Those samples are nan.',
+                      RuntimeWarning)
+
+    return baseline
+
+
 def calculate_dff(roi: Roi, window_size: int = 120, percentile: int = 10):
 
     # Calculate DFF
     imaging_rate = roi.recording['imaging_rate']
     window_size = int(window_size * imaging_rate)
-    if window_size % 2 == 0:
-        window_size += 1
-    half_window_size = int((window_size - 1) // 2)
 
     fluorescence = roi['fluorescence']
-    # Pad and fill
-    f_padded = np.pad(fluorescence, half_window_size, mode='empty')
-    f_padded[:half_window_size] = np.median(fluorescence[:half_window_size])
-    f_padded[-half_window_size:] = np.median(fluorescence[-half_window_size:])
-    # Calculate for each signal datapoint
-    dff = np.zeros(fluorescence.shape)
-    for i in range(dff.shape[0]):
-        fsub = f_padded[i:i + window_size]
-        fmean = np.mean(fsub[fsub < np.percentile(fsub, percentile)])
-        dff[i] = (fluorescence[i] - fmean) / fmean
+
+    baseline = rolling_baseline(fluorescence, window_size, percentile)
+    dff = (fluorescence - baseline) / baseline
 
     # Save
     roi['dff'] = dff
