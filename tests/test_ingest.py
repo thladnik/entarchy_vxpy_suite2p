@@ -208,6 +208,118 @@ class TestPhases:
             assert phase.recording.uuid == recording.uuid
 
 
+class TestConfigurablePhases:
+    """The phase count is a parameter of the synthetic dataset.
+
+    The io file and the stimulus log have to be written from the same windows:
+    the ingest finds a phase's calcium frames by looking its index up in the
+    record group trace, so a phase in only one of the two files would end up
+    with an empty index array.
+    """
+
+    @pytest.mark.parametrize('phase_num', [1, 3, 6])
+    def test_requested_number_of_phases_is_ingested(self, ent, tmp_path, phase_num):
+        dataset = _synthetic_data.build_dataset(
+            (tmp_path / f'data_{phase_num}').as_posix(), phase_num=phase_num)
+
+        animal = ent.add_animal(dataset['animal_path'])
+        ent.add_recording(animal, dataset['recording_path'])
+
+        assert len(ent.get(Phase)) == phase_num
+        assert sorted(p['index'] for p in ent.get(Phase)) == list(range(phase_num))
+
+    def test_windows_reach_the_phase_attributes(self, ent, tmp_path):
+        dataset = _synthetic_data.build_dataset(
+            (tmp_path / 'data_custom').as_posix(),
+            phase_windows={0: (3.0, 5.0), 1: (9.0, 13.0), 2: (15.0, 17.0)})
+
+        animal = ent.add_animal(dataset['animal_path'])
+        ent.add_recording(animal, dataset['recording_path'])
+
+        for index, (start, end) in dataset['phase_windows'].items():
+            phase = ent.get(Phase, f'index == {index}')[0]
+            assert phase['display/__start_time'] == pytest.approx(start)
+            assert phase['display/__target_duration'] == pytest.approx(end - start)
+
+    def test_every_phase_gets_a_calcium_window(self, ent, tmp_path):
+        dataset = _synthetic_data.build_dataset(
+            (tmp_path / 'data_windows').as_posix(), phase_num=5)
+
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'])
+        ca_times = recording['ca_times']
+
+        windows = sorted((p['ca_start_index'], p['ca_end_index'])
+                         for p in ent.get(Phase))
+
+        for start, end in windows:
+            assert 0 <= start < end < len(ca_times)
+
+        # Phases are laid out in order and do not overlap
+        for (_, earlier_end), (later_start, _) in zip(windows, windows[1:]):
+            assert earlier_end < later_start
+
+    def test_visual_names_cycle_over_the_phases(self, ent, tmp_path):
+        dataset = _synthetic_data.build_dataset(
+            (tmp_path / 'data_names').as_posix(), phase_num=4)
+
+        animal = ent.add_animal(dataset['animal_path'])
+        ent.add_recording(animal, dataset['recording_path'])
+
+        names = [ent.get(Phase, f'index == {i}')[0]['display/__visual_name']
+                 for i in range(4)]
+        assert names == ['CMN', 'TranslationGrating', 'CMN', 'TranslationGrating']
+
+    def test_custom_visual_names(self, ent, tmp_path):
+        dataset = _synthetic_data.build_dataset(
+            (tmp_path / 'data_looming').as_posix(), phase_num=2,
+            visual_names=['Looming'])
+
+        animal = ent.add_animal(dataset['animal_path'])
+        ent.add_recording(animal, dataset['recording_path'])
+
+        assert {p['display/__visual_name'] for p in ent.get(Phase)} == {'Looming'}
+
+    def test_record_group_trace_matches_the_windows(self, tmp_path):
+        """Without this the ingest cannot place a phase at all."""
+        windows = _synthetic_data.make_phase_windows(4)
+        _, times = _synthetic_data.mirror_trace()
+
+        ids = _synthetic_data.record_group_trace(times, windows)
+
+        assert set(np.unique(ids)) == {-1, 0, 1, 2, 3}
+        for index, (start, end) in windows.items():
+            inside = ids[(times >= start) & (times < end)]
+            assert (inside == index).all()
+
+    def test_default_dataset_is_unchanged(self, tmp_path):
+        dataset = _synthetic_data.build_dataset((tmp_path / 'data_default').as_posix())
+
+        assert dataset['phase_indices'] == [0, 1]
+        assert dataset['phase_windows'] == {0: (2.0, 6.0), 1: (8.0, 12.0)}
+
+
+class TestMakePhaseWindows:
+
+    def test_evenly_spaced_with_gaps(self):
+        windows = _synthetic_data.make_phase_windows(4)
+
+        assert sorted(windows) == [0, 1, 2, 3]
+        for (_, end), (later_start, _) in zip(windows.values(),
+                                              list(windows.values())[1:]):
+            assert end < later_start
+
+    def test_stays_inside_the_recording(self):
+        windows = _synthetic_data.make_phase_windows(8)
+
+        assert min(start for start, _ in windows.values()) >= 2.0
+        assert max(end for _, end in windows.values()) <= _synthetic_data.DURATION
+
+    def test_rejects_an_empty_protocol(self):
+        with pytest.raises(ValueError, match='at least one'):
+            _synthetic_data.make_phase_windows(0)
+
+
 class TestLayersAndRois:
 
     def test_layer_attributes(self, ingested):

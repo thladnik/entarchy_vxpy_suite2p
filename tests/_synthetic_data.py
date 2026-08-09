@@ -9,6 +9,9 @@ Layout produced::
             recording_metadata.yaml
             Io.hdf5              galvo mirror trace, record group ids
             Display.hdf5         stimulus phases and CMN base data
+
+The number of stimulation phases is configurable: `build_dataset(phase_num=6)`,
+or `phase_windows={0: (2.0, 5.0), ...}` to place them by hand.
             suite2p/
                 plane0/ ops.npy F.npy spks.npy stat.npy iscell.npy
                 plane1/ ...
@@ -24,7 +27,32 @@ MIRROR_FREQUENCY = 10.0     # Hz, one imaging frame per half cycle
 SAMPLE_RATE = 1000.0        # Hz of the analog io recording
 DURATION = 20.0             # s
 
+# Start and end time of each stimulation phase, keyed by phase index. The io file
+#  and the display file have to agree on these: the ingest derives a phase's
+#  calcium frame window by looking for its index in the record group trace, so a
+#  phase present in only one of the two files gets no frames and the ingest fails
+#  on an empty index array.
 PHASE_WINDOWS = {0: (2.0, 6.0), 1: (8.0, 12.0)}
+
+# Cycled over the phases, so a dataset with more phases keeps varied stimuli
+VISUAL_NAMES = ['CMN', 'TranslationGrating']
+
+
+def make_phase_windows(count, start=2.0, end=DURATION - 2.0, duty=0.7):
+    """Evenly spaced phase windows with a gap between them.
+
+    `duty` is the fraction of each slot the phase occupies; the remainder is the
+    inter-phase interval, which the record group trace marks as -1. Windows must
+    stay wide enough to contain several imaging frames, so counts beyond about
+    twenty leave phases with too few frames for the ingest to place them.
+    """
+    if count < 1:
+        raise ValueError('need at least one phase')
+
+    span = (end - start) / count
+
+    return {index: (start + index * span, start + index * span + span * duty)
+            for index in range(count)}
 
 
 def mirror_trace():
@@ -44,26 +72,59 @@ def expected_frame_times():
     return ca_frame_times_from_y_mirror(position, times)[1]
 
 
-def record_group_trace(times):
+def record_group_trace(times, phase_windows=None):
     """Stimulus phase id per analog sample (-1 between phases)."""
+    phase_windows = PHASE_WINDOWS if phase_windows is None else phase_windows
+
     ids = np.full(times.shape, -1, dtype=np.int64)
-    for phase_index, (start, end) in PHASE_WINDOWS.items():
+    for phase_index, (start, end) in phase_windows.items():
         ids[(times >= start) & (times < end)] = phase_index
+
     return ids
 
 
-def write_io_file(path):
+def write_io_file(path, phase_windows=None):
     position, times = mirror_trace()
 
     with h5py.File(os.path.join(path, 'Io.hdf5'), 'w') as f:
         f.create_dataset('ai_y_mirror_in', data=position[:, None])
         f.create_dataset('ai_y_mirror_in_time', data=times[:, None])
-        f.create_dataset('__record_group_id', data=record_group_trace(times)[:, None])
+        f.create_dataset('__record_group_id',
+                         data=record_group_trace(times, phase_windows)[:, None])
         f.create_dataset('__time', data=times[:, None])
 
 
-def write_display_file(path, patch_num=12, cmn_frames=30):
-    """Stimulus log with two phases plus the CMN base data they reference."""
+def write_phases(h5file, phase_windows=None, frames_per_phase=30, visual_names=None):
+    """Write one `phaseN` group per stimulation phase into an open stimulus log.
+
+    The ingest turns each of these into a Phase entity: group attributes become
+    `<file>/<attr>` attributes on it, and datasets inside the group become
+    attributes under their own name.
+
+    Kept separate from the rest of the display file so a test can build a
+    stimulus log with a different number of phases, or vary what they contain,
+    without rewriting the CMN base data alongside it.
+    """
+    phase_windows = PHASE_WINDOWS if phase_windows is None else phase_windows
+    visual_names = VISUAL_NAMES if visual_names is None else visual_names
+
+    for phase_index, (start, end) in sorted(phase_windows.items()):
+        group = h5file.create_group(f'phase{phase_index}')
+
+        group.attrs['__visual_name'] = visual_names[phase_index % len(visual_names)]
+        group.attrs['__start_time'] = start
+        group.attrs['__target_duration'] = end - start
+
+        group.create_dataset('frame_index', data=np.arange(frames_per_phase)[:, None])
+        group.create_dataset('__time',
+                             data=np.linspace(start, end, frames_per_phase)[:, None])
+
+    return sorted(phase_windows)
+
+
+def write_display_file(path, patch_num=12, cmn_frames=30, phase_windows=None,
+                       visual_names=None):
+    """Stimulus log with the stimulation phases plus the CMN base data."""
     rng = np.random.default_rng(4)
 
     with h5py.File(os.path.join(path, 'Display.hdf5'), 'w') as f:
@@ -73,14 +134,8 @@ def write_display_file(path, patch_num=12, cmn_frames=30):
         # Datasets at root level land directly on the Recording entity
         f.create_dataset('__time', data=np.arange(cmn_frames, dtype=float)[:, None])
 
-        for phase_index, (start, end) in PHASE_WINDOWS.items():
-            group = f.create_group(f'phase{phase_index}')
-            group.attrs['__visual_name'] = 'CMN' if phase_index == 0 else 'TranslationGrating'
-            group.attrs['__start_time'] = start
-            group.attrs['__target_duration'] = end - start
-            group.create_dataset('frame_index', data=np.arange(cmn_frames)[:, None])
-            group.create_dataset('__time',
-                                 data=np.linspace(start, end, cmn_frames)[:, None])
+        write_phases(f, phase_windows, frames_per_phase=cmn_frames,
+                     visual_names=visual_names)
 
         # A non-phase group becomes namespaced attributes on the Recording
         cmn = f.create_group('CMN')
@@ -120,8 +175,21 @@ def write_suite2p_plane(path, plane_index, roi_num, frame_num):
 
 
 def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
-                  roi_num=4, plane_num=2, frames_per_plane=None, with_zstack=True):
-    """Create the folder tree and return a description of what was written."""
+                  roi_num=4, plane_num=2, frames_per_plane=None, with_zstack=True,
+                  phase_num=None, phase_windows=None, visual_names=None):
+    """Create the folder tree and return a description of what was written.
+
+    Phases default to PHASE_WINDOWS. Pass `phase_num` for that many evenly
+    spaced ones, or `phase_windows` to place them yourself. Either way the io
+    file and the stimulus log are written from the same windows, which they have
+    to be: the ingest locates a phase's calcium frames by its index in the record
+    group trace.
+    """
+    if phase_windows is None and phase_num is not None:
+        phase_windows = make_phase_windows(phase_num)
+    if phase_windows is None:
+        phase_windows = PHASE_WINDOWS
+
     animal_path = os.path.join(root, animal_id)
     recording_path = os.path.join(animal_path, recording_id)
     os.makedirs(recording_path, exist_ok=True)
@@ -138,8 +206,9 @@ def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
     with open(os.path.join(recording_path, 'recording_metadata.yaml'), 'w') as f:
         yaml.safe_dump({'repeat_num': 2, 'experimenter': 'tester'}, f)
 
-    write_io_file(recording_path)
-    write_display_file(recording_path)
+    write_io_file(recording_path, phase_windows)
+    write_display_file(recording_path, phase_windows=phase_windows,
+                       visual_names=visual_names)
 
     # By default give every plane the same frame count, as suite2p does for a
     # volumetric acquisition. The ingest truncates its reconstructed frame times
@@ -166,5 +235,6 @@ def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
         'frame_times': frame_times,
         'fluorescence': fluorescence,
         'zstack': zstack,
-        'phase_indices': sorted(PHASE_WINDOWS),
+        'phase_indices': sorted(phase_windows),
+        'phase_windows': dict(phase_windows),
     }
