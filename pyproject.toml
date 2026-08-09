@@ -45,6 +45,22 @@ cmn = [
     'scipy',
     'torch',
 ]
+# Running the example notebooks, and the test that executes them
+examples = [
+    'matplotlib',
+    'nbclient',
+    'nbformat',
+    'ipykernel',
+    'asdf',
+]
+dev = [
+    'pytest',
+    'matplotlib',
+    'nbclient',
+    'nbformat',
+    'ipykernel',
+    'asdf',
+]
 
 [tool.setuptools.packages.find]
 where = ['.']
@@ -55,4 +71,5 @@ Homepage = 'https://github.com/thladnik/entarchy_vxpy_suite2p'
 
 [tool.pytest.ini_options]
 testpaths = ['tests']
+markers = ['slow: tests that execute notebooks or spawn subprocess workers']
 filterwarnings = ['ignore::DeprecationWarning:tifffile.*']

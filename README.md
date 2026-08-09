@@ -17,6 +17,22 @@ ent.add_recording(animal, '/data/animal_01/rec_01')
 galvo mirror sync signal), the stimulus log HDF5 files, and a `suite2p/planeN/`
 directory per imaging layer.
 
+### Example notebook
+
+[`examples/01_synthetic_dataset.ipynb`](examples/01_synthetic_dataset.ipynb)
+builds a small entarchy in this schema with synthetic calcium imaging data, then
+works through querying it, DataFrames, parallel analysis with `map_async`, links
+between entities, and archiving. It needs no experimental data and runs in about
+half a minute.
+
+```sh
+pip install -e ".[examples]"
+jupyter lab examples/01_synthetic_dataset.ipynb
+```
+
+It also runs from a checkout without installing, since the first cell puts the
+repository root on the path.
+
 ### Running tests
 
 ```sh
