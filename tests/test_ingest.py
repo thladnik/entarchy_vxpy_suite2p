@@ -1,4 +1,6 @@
 """End-to-end ingest of a synthetic vxpy + suite2p dataset."""
+import os
+
 import numpy as np
 import pytest
 
@@ -461,3 +463,86 @@ class TestUnequalPlaneFrameCounts:
 
         plane0 = ent.get(Layer, 'id == "plane0"')[0]
         assert len(plane0.rois[0]['fluorescence']) == 60
+
+
+class TestBehaviourVideo:
+    """The camera writes frame times into Camera.hdf5 and the frames into a
+    file beside it. The HDF5 is ingested by the generic walk; the video needs
+    taking in explicitly, or the frames behind `tail_pose_data` are gone."""
+
+    def test_video_is_taken_into_the_entarchy(self, ingested):
+        ent, dataset, _, recording = ingested
+
+        video = recording['camera/fish_embedded/video']
+
+        assert video.exists()
+        assert video.path.startswith(ent.path)
+        assert video.read_bytes() == open(dataset['video_path'], 'rb').read()
+
+    def test_the_source_is_not_consumed(self, ingested):
+        """An ingest must not eat the raw data it was pointed at."""
+        _, dataset, _, _ = ingested
+
+        assert os.path.exists(dataset['video_path'])
+
+    def test_it_is_listed_as_media(self, ingested):
+        _, _, _, recording = ingested
+
+        assert recording.media() == ['camera/fish_embedded/video']
+
+    def test_the_digest_verifies(self, ingested):
+        _, _, _, recording = ingested
+
+        assert recording['camera/fish_embedded/video'].verify()
+
+    def test_frame_times_come_from_the_hdf5(self, ingested):
+        """The video is only usable alongside the times the camera recorded."""
+        _, _, _, recording = ingested
+
+        times = recording['camera/fish_embedded_frame_time']
+
+        assert len(times) == 400
+        assert np.all(np.diff(times) > 0)
+
+    def test_tracking_data_is_ingested_as_an_array(self, ingested):
+        """Keypoints are what analysis reads; the video is provenance."""
+        _, _, _, recording = ingested
+
+        assert recording['camera/tail_pose_data'].shape == (400, 9, 3)
+
+    def test_with_video_false_skips_it(self, ent, dataset):
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'], with_video=False)
+
+        assert recording.media() == []
+        assert 'camera/fish_embedded/video' not in recording.keys()
+
+    def test_a_declared_device_without_a_file_warns(self, tmp_path, ent, capsys):
+        dataset = _synthetic_data.build_dataset((tmp_path / 'novideo').as_posix(),
+                                                with_video=False)
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'])
+
+        assert 'has no video file' in capsys.readouterr().out
+        assert recording.media() == []
+
+    def test_a_recording_without_a_camera_file_is_fine(self, tmp_path, ent):
+        dataset = _synthetic_data.build_dataset((tmp_path / 'nocamera').as_posix(),
+                                                with_camera=False)
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'])
+
+        assert recording.media() == []
+
+    def test_an_unrelated_video_is_left_alone(self, tmp_path, ent):
+        """A stimulus animation dropped in the folder is an output, not an
+        acquisition - files are matched to the devices the recording declares."""
+        dataset = _synthetic_data.build_dataset((tmp_path / 'extra').as_posix())
+        stray = os.path.join(dataset['recording_path'], 'stimulus_animation.mp4')
+        with open(stray, 'wb') as f:
+            f.write(b'not an acquisition')
+
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'])
+
+        assert recording.media() == ['camera/fish_embedded/video']

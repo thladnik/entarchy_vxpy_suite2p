@@ -9,6 +9,8 @@ Layout produced::
             recording_metadata.yaml
             Io.hdf5              galvo mirror trace, record group ids
             Display.hdf5         stimulus phases and CMN base data
+            Camera.hdf5          behaviour camera frame times and tail tracking
+            fish_embedded_frame.avi   the frames those times belong to
 
 The number of stimulation phases is configurable: `build_dataset(phase_num=6)`,
 or `phase_windows={0: (2.0, 5.0), ...}` to place them by hand.
@@ -146,6 +148,38 @@ def write_display_file(path, patch_num=12, cmn_frames=30, phase_windows=None,
         cmn.create_dataset('motion_vectors_0', data=rng.normal(size=(cmn_frames, patch_num, 3)))
 
 
+def write_camera_file(path, device='fish_embedded', frame_rate=160, frame_num=400,
+                      with_video=True):
+    """Camera.hdf5 plus the video the camera wrote beside it.
+
+    The pair is what the ingest has to reconcile: the HDF5 carries the frame
+    times and whatever tracking ran on the frames, the file beside it carries
+    the frames. Named as vxpy names them - `<device>_frame.avi` for the device
+    listed in `__camera_device_list`.
+
+    The video is not a real one. Nothing in the ingest decodes it, which is the
+    point: entarchy stores it and never looks inside.
+    """
+    times = np.arange(frame_num) / frame_rate
+
+    with h5py.File(os.path.join(path, 'Camera.hdf5'), 'w') as f:
+        f.attrs['__camera_device_list'] = np.array([device], dtype=object)
+        f.attrs[f'__{device}_frame_rate'] = frame_rate
+        f.attrs[f'__{device}_height'] = 304
+        f.attrs[f'__{device}_model'] = 'a2A1920-160umBAS'
+
+        f.create_dataset('__time', data=times[:, None])
+        f.create_dataset(f'{device}_frame_time', data=times[:, None])
+        # Nine tail keypoints, x/y/confidence - the shape the tracking writes
+        rng = np.random.default_rng(11)
+        f.create_dataset('tail_pose_data', data=rng.normal(size=(frame_num, 9, 3)))
+        f.create_dataset('tail_pose_data_time', data=times[:, None])
+
+    if with_video:
+        with open(os.path.join(path, f'{device}_frame.avi'), 'wb') as f:
+            f.write(b'RIFF----AVI ' + bytes(range(256)) * 8)
+
+
 def write_suite2p_plane(path, plane_index, roi_num, frame_num):
     plane_path = os.path.join(path, 'suite2p', f'plane{plane_index}')
     os.makedirs(plane_path, exist_ok=True)
@@ -176,7 +210,8 @@ def write_suite2p_plane(path, plane_index, roi_num, frame_num):
 
 def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
                   roi_num=4, plane_num=2, frames_per_plane=None, with_zstack=True,
-                  phase_num=None, phase_windows=None, visual_names=None):
+                  phase_num=None, phase_windows=None, visual_names=None,
+                  with_camera=True, with_video=True):
     """Create the folder tree and return a description of what was written.
 
     Phases default to PHASE_WINDOWS. Pass `phase_num` for that many evenly
@@ -209,6 +244,8 @@ def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
     write_io_file(recording_path, phase_windows)
     write_display_file(recording_path, phase_windows=phase_windows,
                        visual_names=visual_names)
+    if with_camera:
+        write_camera_file(recording_path, with_video=with_video)
 
     # By default give every plane the same frame count, as suite2p does for a
     # volumetric acquisition. The ingest truncates its reconstructed frame times
@@ -237,4 +274,7 @@ def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
         'zstack': zstack,
         'phase_indices': sorted(phase_windows),
         'phase_windows': dict(phase_windows),
+        'camera_device': 'fish_embedded' if with_camera else None,
+        'video_path': (os.path.join(recording_path, 'fish_embedded_frame.avi')
+                       if with_camera and with_video else None),
     }

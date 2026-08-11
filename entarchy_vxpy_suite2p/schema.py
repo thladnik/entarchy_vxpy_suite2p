@@ -217,10 +217,64 @@ class Suite2PVxPy(entarchy.Entarchy):
 
         return animal
 
+    # Behaviour cameras write one video per device beside the HDF5 files, named
+    #  after the device that produced it: fish_embedded -> fish_embedded_frame.avi
+    VIDEO_SUFFIXES = ('.avi', '.mp4', '.mkv', '.mov')
+
+    def _camera_devices(self, path: str) -> list[str]:
+        """The camera devices Camera.hdf5 says this recording used."""
+        camera_path = next((os.path.join(path, name) for name in os.listdir(path)
+                            if name.lower() == 'camera.hdf5'), None)
+        if camera_path is None:
+            return []
+
+        with h5py.File(camera_path, 'r') as h5file:
+            devices = h5file.attrs.get('__camera_device_list', [])
+
+        return [str(device) for device in devices]
+
+    def _add_recording_videos(self, recording: Recording, path: str) -> list[str]:
+        """Take the behaviour videos of a recording into the entarchy.
+
+        Camera.hdf5 already carries the frame times and whatever tracking ran on
+        the video; what it does not carry is the video. Without it the frames
+        behind `tail_pose_data` cannot be looked at again, and an entarchy is
+        meant to hold everything it needs.
+
+        Videos are copied, never moved - an ingest must not consume the raw data
+        it was pointed at. Files are matched to the camera devices the recording
+        declares, so a video that is an output rather than an acquisition (a
+        stimulus animation dropped in the folder, say) is left alone.
+
+        Returns:
+            list of str: the attribute names written.
+        """
+        entries = {name.lower(): name for name in os.listdir(path)}
+        written = []
+
+        for device in self._camera_devices(path):
+            for suffix in self.VIDEO_SUFFIXES:
+                candidate = entries.get(f'{device}_frame{suffix}'.lower())
+                if candidate is None:
+                    continue
+
+                name = f'camera/{device}/video'
+                source = os.path.join(path, candidate)
+                print(f'> Take in {candidate} '
+                      f'({os.path.getsize(source) / 1024 ** 2:.1f} MB)')
+                recording.set_media(name, source)
+                written.append(name)
+                break
+            else:
+                print(f'WARNING: camera device "{device}" has no video file in {path}')
+
+        return written
+
     @entarchy.digest_method
     def add_recording(self, animal: Animal, path: str,
                       sync_signal: str = None, sync_signal_time: str = None,
-                      sync_type = None, frame_avg_num: int | Callable = 1) -> Recording | None:
+                      sync_type = None, frame_avg_num: int | Callable = 1,
+                      with_video: bool = True) -> Recording | None:
 
         sync_type = 'y_mirror' if sync_type is None else sync_type
 
@@ -380,6 +434,9 @@ class Suite2PVxPy(entarchy.Entarchy):
                             for key2, member2 in member1.items():
                                 if isinstance(member2, h5py.Dataset):
                                     recording[f'{fn_short}/{key1}/{key2}'] = np.squeeze(member2[:])
+
+            if with_video:
+                self._add_recording_videos(recording, path)
 
             for layer_str in layers:
 
