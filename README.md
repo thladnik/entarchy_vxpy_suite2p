@@ -15,7 +15,14 @@ ent.add_recording(animal, '/data/animal_01/rec_01')
 
 `add_recording` expects a vxpy recording folder containing `Io.hdf5` (with the
 galvo mirror sync signal), the stimulus log HDF5 files, and a `suite2p/planeN/`
-directory per imaging layer.
+directory per imaging layer. Behaviour videos beside them are taken into the
+entarchy as media attributes; pass `with_video=False` to skip that.
+
+That imaging is present, and that suite2p produced it, are currently
+assumptions rather than options —
+[a proposal](docs/proposals/imaging-sources.md) sets out what it would take to
+make a recording work without imaging and to ingest signals from more than one
+source.
 
 ### Example notebook
 
