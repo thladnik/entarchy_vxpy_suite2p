@@ -106,11 +106,11 @@ class TestProperties:
 class TestCalculateDff:
 
     def test_writes_dff_to_the_roi(self):
-        class FakeRecording(dict):
+        class FakeImaging(dict):
             pass
 
         class FakeRoi(dict):
-            recording = FakeRecording({'imaging_rate': 10.0})
+            imaging = FakeImaging({'rate': 10.0})
 
         rng = np.random.default_rng(11)
         roi = FakeRoi({'fluorescence': 500 + 20 * rng.random(300)})
@@ -122,11 +122,11 @@ class TestCalculateDff:
         assert np.all(np.isfinite(roi['dff']))
 
     def test_matches_the_full_original_calculation(self):
-        class FakeRecording(dict):
+        class FakeImaging(dict):
             pass
 
         class FakeRoi(dict):
-            recording = FakeRecording({'imaging_rate': 10.0})
+            imaging = FakeImaging({'rate': 10.0})
 
         rng = np.random.default_rng(12)
         fluorescence = 500 + 20 * rng.random(400)

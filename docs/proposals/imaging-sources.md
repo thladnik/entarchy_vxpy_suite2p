@@ -1,5 +1,9 @@
 # Making imaging optional, and its source a choice
 
+**Implemented.** All five steps are done; what follows is the reasoning, kept
+because the alternatives it rejects are the questions anyone changing this will
+ask again. Where the implementation deviated, it says so.
+
 A Recording currently *is* a two-photon recording processed by suite2p. That is
 not stated anywhere; it is implied by what `add_recording` does and what it
 crashes on. This proposal separates three things the code treats as one — a
@@ -281,10 +285,15 @@ not the rest happens. **Steps 1 and 2 are done.**
    *After this, a behaviour-only recording ingests.*
 2. ~~**Normalise the Roi contract.**~~ Done, and checked at ingest: the CMN
    analysis now names suite2p nowhere.
-3. **Add the `Imaging` level** and move the timing attributes onto it. One
-   source per recording still, but the structure is in place.
-4. **Extract the source interface** and re-implement suite2p behind it.
-5. **Allow several**, and `add_imaging` after the fact.
+3. ~~**Add the `Imaging` level**~~ and move the timing attributes onto it.
+4. ~~**Extract the source interface**~~ and re-implement suite2p behind it.
+5. ~~**Allow several**~~, and `add_imaging` after the fact.
 
-Step 3 is the breaking one. Steps 1, 2, 4 and 5 are refactors that keep the
-stored shape or extend it.
+Step 3 was the breaking one. `_implementation_version` is 0.3.
+
+One thing the implementation found that the proposal did not anticipate:
+entities queued inside a write context are invisible to a query until they are
+written, so both the ROI contract check and the phase-frame linking had to
+follow a `commit()`. The contract check written in step 2 had been inspecting an
+empty collection and passing; there is now a test with a deliberately broken
+source that fails if that regresses.

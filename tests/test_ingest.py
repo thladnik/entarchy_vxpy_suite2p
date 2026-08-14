@@ -5,7 +5,9 @@ import numpy as np
 import pytest
 
 from entarchy.backend import SQLiteBackend
-from entarchy_vxpy_suite2p.schema import Animal, Layer, Phase, Recording, Roi, Suite2PVxPy
+from entarchy_vxpy_suite2p.schema import (Animal, Imaging, ImagingSource, ImagingSpec,
+                                          Layer, Phase, Recording, Roi, Suite2PVxPy,
+                                          imaging_sources)
 
 import _synthetic_data
 
@@ -84,14 +86,23 @@ class TestAddRecording:
         assert len(ent.get(Roi)) == dataset['plane_num'] * dataset['roi_num']
 
     def test_parent_links(self, ingested):
+        """Animal > Recording > Imaging > Layer > Roi, with each level able to
+        name its ancestors however many steps away they are."""
         ent, _, animal, recording = ingested
 
         assert recording.parent.uuid == animal.uuid
+
+        imaging = ent.get(Imaging)[0]
+        assert imaging.parent.uuid == recording.uuid
+
         layer = ent.get(Layer)[0]
-        assert layer.parent.uuid == recording.uuid
+        assert layer.parent.uuid == imaging.uuid
+        assert layer.imaging.uuid == imaging.uuid
+        assert layer.recording.uuid == recording.uuid
 
         roi = ent.get(Roi)[0]
-        assert roi.layer.uuid == layer.parent.uuid or roi.layer.parent.uuid == recording.uuid
+        assert roi.layer.parent.uuid == imaging.uuid
+        assert roi.imaging.uuid == imaging.uuid
         assert roi.recording.uuid == recording.uuid
         assert roi.animal.uuid == animal.uuid
 
@@ -130,27 +141,45 @@ class TestAddRecording:
 
 
 class TestFrameTiming:
+    """Timing belongs to the imaging source, not to the recording: two sources
+    of one recording may sample it at different rates."""
 
-    def test_imaging_rate_is_plausible(self, ingested):
+    def test_rate_is_plausible(self, ingested):
         _, _, _, recording = ingested
         # 10 Hz mirror -> 20 half-cycles per second, split across 2 planes
-        assert recording['imaging_rate'] == pytest.approx(10.0, rel=0.05)
+        assert recording.sole_imaging()['rate'] == pytest.approx(10.0, rel=0.05)
 
-    def test_ca_times_are_monotonic(self, ingested):
+    def test_frame_times_are_monotonic(self, ingested):
         _, _, _, recording = ingested
-        assert np.all(np.diff(recording['ca_times']) > 0)
+        assert np.all(np.diff(recording.sole_imaging()['frame_times']) > 0)
 
-    def test_signal_length_matches_ca_times(self, ingested):
+    def test_frame_num_matches_frame_times(self, ingested):
         _, _, _, recording = ingested
-        assert recording['signal_length'] == len(recording['ca_times'])
+        imaging = recording.sole_imaging()
+        assert imaging['frame_num'] == len(imaging['frame_times'])
 
-    def test_ca_times_match_fluorescence_length(self, ingested):
-        """Every ROI's signal must be indexable by the recording timeline."""
+    def test_frame_times_match_fluorescence_length(self, ingested):
+        """Every ROI's signal must be indexable by its source's timeline."""
         ent, dataset, _, recording = ingested
-        ca_times = recording['ca_times']
+        frame_times = recording.sole_imaging()['frame_times']
 
         for roi in ent.get(Roi):
-            assert len(roi['fluorescence']) == len(ca_times)
+            assert len(roi['fluorescence']) == len(frame_times)
+
+    def test_the_recording_carries_no_imaging_timing(self, ingested):
+        _, _, _, recording = ingested
+
+        for name in ('imaging_rate', 'ca_times', 'signal_length', 'record_group_ids'):
+            assert name not in recording
+
+    def test_the_source_records_what_it_was(self, ingested):
+        _, _, _, recording = ingested
+        imaging = recording.sole_imaging()
+
+        assert imaging.id == 'suite2p'
+        assert imaging['method'] == 'suite2p'
+        assert imaging['timing'] == 'sync_signal'
+        assert imaging['layer_num'] == 2
 
     def test_layer_time_offsets(self, ingested):
         ent, dataset, _, recording = ingested
@@ -159,11 +188,12 @@ class TestFrameTiming:
         assert offsets['plane0'] == 0.0
         assert offsets['plane1'] > 0.0
 
-    def test_record_group_ids_are_interpolated_to_frames(self, ingested):
+    def test_the_raw_record_group_trace_is_on_the_recording(self, ingested):
+        """On the io timebase, where it needs no microscope to mean anything."""
         _, _, _, recording = ingested
 
-        ids = recording['record_group_ids']
-        assert set(np.unique(ids)).issubset({-1.0, 0.0, 1.0})
+        ids = recording['io/__record_group_id']
+        assert set(np.unique(ids)).issubset({-1, 0, 1})
         assert (ids == 0).any() and (ids == 1).any()
 
 
@@ -192,17 +222,16 @@ class TestPhases:
 
     def test_calcium_window_indices(self, ingested):
         ent, _, _, recording = ingested
-        ca_times = recording['ca_times']
+        frame_times = recording.sole_imaging()['frame_times']
 
         for phase in ent.get(Phase):
-            start = phase['ca_start_index']
-            end = phase['ca_end_index']
+            start, end = phase.frames_in()
 
-            assert 0 <= start < end < len(ca_times)
+            assert 0 <= start < end < len(frame_times)
             # The window must overlap the stimulus interval it was derived from
-            assert ca_times[start] >= phase['display/__start_time'] - 0.5
-            assert ca_times[end] <= (phase['display/__start_time']
-                                     + phase['display/__target_duration'] + 0.5)
+            assert frame_times[start] >= phase['display/__start_time'] - 0.5
+            assert frame_times[end] <= (phase['display/__start_time']
+                                        + phase['display/__target_duration'] + 0.5)
 
     def test_phases_are_children_of_recording(self, ingested):
         ent, _, _, recording = ingested
@@ -249,13 +278,12 @@ class TestConfigurablePhases:
 
         animal = ent.add_animal(dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
-        ca_times = recording['ca_times']
+        frame_times = recording.sole_imaging()['frame_times']
 
-        windows = sorted((p['ca_start_index'], p['ca_end_index'])
-                         for p in ent.get(Phase))
+        windows = sorted(p.frames_in() for p in ent.get(Phase))
 
         for start, end in windows:
-            assert 0 <= start < end < len(ca_times)
+            assert 0 <= start < end < len(frame_times)
 
         # Phases are laid out in order and do not overlap
         for (_, earlier_end), (later_start, _) in zip(windows, windows[1:]):
@@ -423,7 +451,7 @@ class TestImmutabilityAfterIngest:
         ent, _, _, recording = ingested
 
         with pytest.raises(RuntimeError, match='immutable'):
-            recording['imaging_rate'] = 999.0
+            recording.sole_imaging()['rate'] = 999.0
 
     def test_analysis_attributes_remain_writable(self, ingested):
         ent, _, _, _ = ingested
@@ -463,16 +491,16 @@ class TestQueryingIngestedData:
 class TestUnequalPlaneFrameCounts:
     """Documents how recording-level timing behaves when planes differ in length."""
 
-    def test_ca_times_follow_the_last_processed_layer(self, tmp_path, ent):
+    def test_frame_times_follow_the_last_processed_layer(self, tmp_path, ent):
         dataset = _synthetic_data.build_dataset((tmp_path / 'uneven').as_posix(),
                                                 frames_per_plane=[60, 40])
 
         animal = ent.add_animal(dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
 
-        # ca_times is assigned after the layer loop, so it reflects plane1 (40),
-        # not plane0 (60) - ROI signals in plane0 are then longer than ca_times.
-        assert len(recording['ca_times']) == 40
+        # frame_times is assigned after the layer loop, so it reflects plane1
+        # (40), not plane0 (60) - ROI signals in plane0 are then longer.
+        assert len(recording.sole_imaging()['frame_times']) == 40
 
         plane0 = ent.get(Layer, 'id == "plane0"')[0]
         assert len(plane0.rois[0]['fluorescence']) == 60
@@ -647,7 +675,7 @@ class TestImagingSelection:
                                                 with_suite2p=False)
         animal = ent.add_animal(dataset['animal_path'])
 
-        with pytest.raises(FileNotFoundError, match='no suite2p plane directories'):
+        with pytest.raises(FileNotFoundError, match='found no data'):
             ent.add_recording(animal, dataset['recording_path'], imaging='suite2p')
 
     def test_an_unknown_source_is_refused(self, ent, dataset):
@@ -693,3 +721,174 @@ class TestPhaseTimeWindows:
         ent, _, _, recording = ingested
 
         assert all('start_time' in phase for phase in ent.get(Phase))
+
+
+class FakeSource(ImagingSource):
+    """A second source, so that "several" is exercised rather than asserted.
+
+    Reads the same folder but writes two ROIs per plane, so the two sources are
+    told apart by what they produced.
+    """
+    name = 'fake'
+
+    def detect(self, path):
+        return len(self.layer_names(path)) > 0
+
+    def layer_names(self, path):
+        return imaging_sources['suite2p'].layer_names(path)
+
+    def ingest(self, imaging, path, frame_times_by_layer, options):
+        ent = imaging.entarchy
+        frame_times = frame_times_by_layer[0].squeeze()
+
+        for layer_index, layer_name in enumerate(self.layer_names(path)):
+            layer = Layer(ent, _id=layer_name, _parent=imaging)
+            ent.add_new_entity(layer)
+            layer['index'] = layer_index
+
+            for roi_index in range(2):
+                roi = Roi(ent, _id=f'Roi_{roi_index}', _parent=layer)
+                ent.add_new_entity(roi)
+                roi['index'] = roi_index
+                roi['fluorescence'] = np.arange(len(frame_times), dtype=float)
+
+        imaging['frame_times'] = frame_times
+        imaging['frame_num'] = len(frame_times)
+
+
+class BrokenSource(FakeSource):
+    """Writes ROIs without the required fluorescence."""
+    name = 'broken'
+
+    def ingest(self, imaging, path, frame_times_by_layer, options):
+        ent = imaging.entarchy
+        layer = Layer(ent, _id='plane0', _parent=imaging)
+        ent.add_new_entity(layer)
+        roi = Roi(ent, _id='Roi_0', _parent=layer)
+        ent.add_new_entity(roi)
+        roi['index'] = 0
+
+        imaging['frame_times'] = frame_times_by_layer[0].squeeze()
+        imaging['frame_num'] = len(imaging['frame_times'])
+
+
+def _two_sources(ent, dataset):
+    animal = ent.add_animal(dataset['animal_path'])
+    return ent.add_recording(
+        animal, dataset['recording_path'],
+        imaging=['suite2p', ImagingSpec(source=FakeSource(), name='fake')])
+
+
+class TestSeveralSources:
+
+    def test_two_sources_coexist(self, ent, dataset):
+        recording = _two_sources(ent, dataset)
+
+        assert sorted(source.id for source in recording.imaging) == ['fake', 'suite2p']
+
+    def test_each_source_owns_its_layers_and_rois(self, ent, dataset):
+        recording = _two_sources(ent, dataset)
+
+        suite2p = recording.imaging['suite2p']
+        fake = recording.imaging['fake']
+
+        assert len(suite2p.rois) == dataset['roi_num'] * dataset['plane_num']
+        assert len(fake.rois) == 2 * dataset['plane_num']
+        assert len(recording.rois) == len(suite2p.rois) + len(fake.rois)
+
+    def test_colliding_layer_ids_do_not_collide(self, ent, dataset):
+        """Both sources call their first plane plane0. They are different
+        entities because they hang off different Imaging parents - which is the
+        reason for the extra level."""
+        recording = _two_sources(ent, dataset)
+
+        plane0s = ent.get(Layer, 'id == "plane0"')
+
+        assert len(plane0s) == 2
+        assert len({layer.imaging.id for layer in plane0s}) == 2
+
+    def test_each_source_gets_its_own_phase_window(self, ent, dataset):
+        recording = _two_sources(ent, dataset)
+        phase = sorted(recording.phases, key=lambda p: p['index'])[0]
+
+        assert phase.frames_in(recording.imaging['suite2p']) is not None
+        assert phase.frames_in(recording.imaging['fake']) is not None
+
+    def test_asking_without_naming_one_is_refused(self, ent, dataset):
+        recording = _two_sources(ent, dataset)
+
+        with pytest.raises(LookupError, match='several imaging sources'):
+            recording.sole_imaging()
+
+        with pytest.raises(LookupError, match='several imaging sources'):
+            sorted(recording.phases, key=lambda p: p['index'])[0].frames_in()
+
+    def test_an_unknown_source_name_is_reported(self, ingested):
+        _, _, _, recording = ingested
+
+        with pytest.raises(KeyError, match='No imaging source'):
+            recording.imaging['caiman']
+
+
+class TestAddImagingLater:
+
+    def test_a_source_can_be_added_after_ingest(self, ent, dataset):
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
+        assert len(recording.imaging) == 0
+
+        imaging = ent.add_imaging(recording, 'suite2p', path=dataset['recording_path'])
+
+        assert imaging.id == 'suite2p'
+        assert len(recording.imaging) == 1
+        assert len(recording.rois) == dataset['roi_num'] * dataset['plane_num']
+        assert recording['has_imaging'] is True
+
+    def test_phase_windows_are_linked_for_a_later_source(self, ent, dataset):
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
+
+        imaging = ent.add_imaging(recording, 'suite2p', path=dataset['recording_path'])
+
+        for phase in recording.phases:
+            assert phase.frames_in(imaging) is not None
+
+    def test_a_second_source_can_be_added_later(self, ent, dataset):
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'])
+
+        ent.add_imaging(recording, FakeSource(), path=dataset['recording_path'],
+                        name='fake')
+
+        assert sorted(source.id for source in recording.imaging) == ['fake', 'suite2p']
+
+    def test_a_duplicate_name_is_refused(self, ent, dataset):
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'])
+
+        with pytest.raises(ValueError, match='already has an imaging source'):
+            ent.add_imaging(recording, 'suite2p', path=dataset['recording_path'])
+
+    def test_the_path_must_be_given(self, ent, dataset):
+        """An entarchy is self-contained; it does not keep a path it can read."""
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
+
+        with pytest.raises(ValueError, match='needs the recording folder'):
+            ent.add_imaging(recording, 'suite2p')
+
+
+class TestSourceContract:
+
+    def test_a_source_that_breaks_the_contract_is_caught(self, ent, dataset):
+        """The check has to run after a commit, or it inspects an empty
+        collection and passes - which is what it did when first written."""
+        animal = ent.add_animal(dataset['animal_path'])
+
+        with pytest.raises(RuntimeError, match=r"without \['fluorescence'\]"):
+            ent.add_recording(animal, dataset['recording_path'],
+                              imaging=ImagingSpec(source=BrokenSource(), name='broken'))
+
+    def test_the_contract_is_declared(self):
+        assert Suite2PVxPy.ROI_REQUIRED == ('index', 'fluorescence')
+        assert 'is_unit' in Suite2PVxPy.ROI_OPTIONAL

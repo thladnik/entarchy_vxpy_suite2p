@@ -69,7 +69,7 @@ def rolling_baseline(fluorescence: np.ndarray, window_size: int, percentile: int
 def calculate_dff(roi: Roi, window_size: int = 120, percentile: int = 10):
 
     # Calculate DFF
-    imaging_rate = roi.recording['imaging_rate']
+    imaging_rate = roi.imaging['rate']
     window_size = int(window_size * imaging_rate)
 
     fluorescence = roi['fluorescence']
@@ -84,14 +84,15 @@ def calculate_dff(roi: Roi, window_size: int = 120, percentile: int = 10):
 def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: int = 16):
     # Get data
 
-    # TODO: temporary to deal with incomplete entities (ingest problem)
-    if 'ca_times' not in rec:
-        print(f'Failed to process {rec} altogether')
+    # A recording may legitimately have no imaging - behaviour only - and this
+    #  analysis is about calcium signals, so there is nothing here for it
+    if len(rec.imaging) == 0:
+        print(f'{rec} has no imaging data; skipping')
         return
 
     repeat_num = rec['metadata/repeat_num']
 
-    ca_times = rec['ca_times']
+    ca_times = rec.sole_imaging()['frame_times']
     time_resampled = np.arange(ca_times[0], ca_times[-1], 1 / sample_rate)
     rec['time_resampled'] = time_resampled
     rec['sample_rate'] = sample_rate
@@ -293,7 +294,8 @@ def process_recording(rec: Recording, sample_rate: float = 10., radial_bin_num: 
 def calculate_autocorrelations(roi: Roi):
 
     dff = roi['dff']
-    repeat_num, ca_times, time_resampled = roi.recording[['metadata/repeat_num', 'ca_times', 'time_resampled']]
+    repeat_num, time_resampled = roi.recording[['metadata/repeat_num', 'time_resampled']]
+    ca_times = roi.imaging['frame_times']
 
     # Interpolate DFF to new time
     roi['dff_resampled'] = scipy.interpolate.interp1d(ca_times, dff, kind='nearest')(time_resampled)
@@ -306,7 +308,8 @@ def calculate_autocorrelations(roi: Roi):
         # Calculate phase max DFFs
         dff_phase_max = np.zeros((repeat_num, repeat_len))
         for _, phase in phase_df.iterrows():
-            dff_p = dff[phase['ca_start_index']:phase['ca_end_index']]
+            start_index, end_index = phase.frames_in(roi.imaging)
+            dff_p = dff[start_index:end_index]
             phase['dff'] = dff_p
             dff_phase_max[phase['repeat_num'], phase['repeat_index']] = np.mean(dff_p)
         roi[f'{motion_type}_dff_phase_mean'] = dff_phase_max

@@ -138,8 +138,9 @@ class TestAreRoisInRegion:
 
 class TestProcessRecordingGuards:
 
-    def test_recording_without_ca_times_is_skipped(self, tmp_path, capsys):
-        """process_recording tolerates entities left incomplete by a failed ingest."""
+    def test_recording_without_imaging_is_skipped(self, tmp_path, capsys):
+        """A recording may legitimately have no imaging, and this analysis is
+        about calcium signals."""
         from entarchy_vxpy_suite2p.schema import Animal, Recording
 
         base = (tmp_path / 'partial').as_posix()
@@ -153,6 +154,6 @@ class TestProcessRecordingGuards:
 
             functions.process_recording(recording)
 
-            assert 'Failed to process' in capsys.readouterr().out
+            assert 'no imaging data' in capsys.readouterr().out
         finally:
             ent.backend.close()

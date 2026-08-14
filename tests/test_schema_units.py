@@ -5,7 +5,7 @@ import yaml
 
 import entarchy
 from entarchy_vxpy_suite2p import schema
-from entarchy_vxpy_suite2p.schema import (Animal, Layer, Phase, Recording, Roi, Suite2PVxPy,
+from entarchy_vxpy_suite2p.schema import (Animal, Imaging, Layer, Phase, Recording, Roi, Suite2PVxPy,
                                           ca_frame_times_from_sync_toggle,
                                           ca_frame_times_from_y_mirror,
                                           frame_time_methods, unravel_dict)
@@ -16,28 +16,31 @@ class TestHierarchyDeclaration:
     def test_resolved_hierarchy(self):
         hierarchy, entity_map = Suite2PVxPy._resolve_hierarchy()
 
-        assert hierarchy['Animal'] == {'Recording': {'Layer': {'Roi': {}}, 'Phase': {}}}
-        for name in ('Animal', 'Recording', 'Layer', 'Roi', 'Phase'):
+        assert hierarchy['Animal'] == {
+            'Recording': {'Imaging': {'Layer': {'Roi': {}}}, 'Phase': {}}}
+        for name in ('Animal', 'Recording', 'Imaging', 'Layer', 'Roi', 'Phase'):
             assert name in entity_map
 
     def test_child_entity_types(self):
         assert Animal.get_child_entity_types() == [Recording]
-        assert Recording.get_child_entity_types() == [Layer, Phase]
+        assert Recording.get_child_entity_types() == [Imaging, Phase]
+        assert Imaging.get_child_entity_types() == [Layer]
         assert Layer.get_child_entity_types() == [Roi]
         assert Roi.get_child_entity_types() is None
 
     def test_collection_types_are_registered(self):
-        from entarchy_vxpy_suite2p.schema import (AnimalCollection, LayerCollection,
-                                                  PhaseCollection, RecordingCollection,
-                                                  RoiCollection)
+        from entarchy_vxpy_suite2p.schema import (AnimalCollection, ImagingCollection,
+                                                  LayerCollection, PhaseCollection,
+                                                  RecordingCollection, RoiCollection)
         assert Animal.get_collection_type() is AnimalCollection
         assert Recording.get_collection_type() is RecordingCollection
         assert Layer.get_collection_type() is LayerCollection
         assert Roi.get_collection_type() is RoiCollection
         assert Phase.get_collection_type() is PhaseCollection
+        assert Imaging.get_collection_type() is ImagingCollection
 
     def test_entities_subclass_entarchy_entity(self):
-        for entity_type in (Animal, Recording, Layer, Roi, Phase):
+        for entity_type in (Animal, Recording, Imaging, Layer, Roi, Phase):
             assert issubclass(entity_type, entarchy.Entity)
 
     def test_version_is_declared(self):

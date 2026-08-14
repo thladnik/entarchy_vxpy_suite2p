@@ -85,7 +85,7 @@ def plot_distribution(entities, *attributes,
 def plot_event_classification_debug(roi: Roi):
     # Recording
     cmn_selection = roi.recording['cmn_phase_selection_original']
-    times = roi.recording['ca_times']
+    times = roi.imaging['frame_times']
     times[~cmn_selection] = np.nan
     # Roi
     dff = roi['dff']

@@ -18,19 +18,50 @@ galvo mirror sync signal) and the stimulus log HDF5 files. Behaviour videos
 beside them are taken into the entarchy as media attributes; pass
 `with_video=False` to skip that.
 
-**Imaging is optional.** A recording of stimulus, io and behaviour data alone
-ingests completely — phases included, since a stimulation phase is a fact about
-what was shown rather than about the microscope.
+**Imaging is optional, and its source is a choice.** A recording of stimulus,
+io and behaviour data alone ingests completely — phases included, since a
+stimulation phase is a fact about what was shown rather than about the
+microscope.
 
 ```python
-ent.add_recording(animal, path)                     # suite2p if the folder has it
-ent.add_recording(animal, path, imaging='suite2p')  # require it
-ent.add_recording(animal, path, imaging=None)       # skip it
+ent.add_recording(animal, path)                     # every source found in the folder
+ent.add_recording(animal, path, imaging='suite2p')  # this one, and require it
+ent.add_recording(animal, path, imaging=None)       # none
+
+# several, and later
+ent.add_recording(animal, path, imaging=['suite2p', ImagingSpec(CaImAnSource(),
+                                                               name='caiman')])
+ent.add_imaging(recording, 'suite2p', path='/data/fish1/rec_01')
+```
+
+Each source is an `Imaging` entity under the Recording, named after itself, and
+its layers and ROIs hang off it:
+
+```
+Animal > Recording > Imaging > Layer > Roi
+                   > Phase
+```
+
+so `plane0` from suite2p and `plane0` from CaImAn are different entities rather
+than a collision. Everything about when frames happened belongs to the source —
+`imaging['rate']`, `imaging['frame_times']` — because two sources of one
+recording need not agree.
+
+```python
+recording.imaging               # every source
+recording.imaging['suite2p']    # one by name
+recording.sole_imaging()        # the only one, or an error saying there are several
+recording.rois                  # every ROI, whichever source found it
 ```
 
 Phases always carry `start_time` and `end_time` in seconds, read off the record
-group trace so they say when the phase actually ran. `ca_start_index` /
-`ca_end_index` are added only when there are imaging frames to index.
+group trace so they say when the phase actually ran. Which *frames* a phase
+covers depends on the source, so it is a link rather than an attribute:
+
+```python
+phase.frames_in(imaging)    # (start_index, end_index)
+phase.frames_in()           # when there is only one source
+```
 
 ### What an ROI carries
 
@@ -49,9 +80,11 @@ A source's own vocabulary stays namespaced beside these — `s2p/npix`,
 reads an ROI without knowing what produced it, which is why the CMN analysis
 mentions suite2p nowhere. The required names are checked at ingest.
 
-Making the source itself a choice, rather than suite2p with the serial numbers
-filed off, is [a proposal](docs/proposals/imaging-sources.md); this is the first
-two steps of it.
+Adding a source means implementing `ImagingSource` — `detect`, `layer_names`,
+`ingest` — and registering it in `imaging_sources`. Frame timing is a separate
+interface (`FrameTiming`), because how a scanner was timed and what read its
+output are independent choices. The reasoning is in
+[the proposal](docs/proposals/imaging-sources.md).
 
 ### Example notebook
 
