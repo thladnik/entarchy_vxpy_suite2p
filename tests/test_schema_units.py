@@ -1,4 +1,5 @@
 """Schema-level helpers: hierarchy declaration, metadata flattening, frame timing."""
+import os
 import numpy as np
 import pytest
 import yaml
@@ -290,6 +291,53 @@ class TestClockDivisionTiming:
     def test_a_nonsense_ratio_is_refused(self):
         with pytest.raises(ValueError, match='must be positive'):
             ClockDivisionTiming(0)
+
+
+class TestLongPath:
+    """Windows stops opening files past 260 characters, and registration output
+    nests two long image names, so it lands there."""
+
+    def test_a_short_path_is_left_alone(self, tmp_path):
+        assert not schema.long_path(str(tmp_path)).startswith('\\\\?\\')
+
+    def test_a_long_path_is_marked_on_windows(self, tmp_path):
+        deep = tmp_path.joinpath(*['a_reasonably_long_folder_name'] * 12)
+
+        marked = schema.long_path(str(deep))
+
+        if os.name == 'nt':
+            assert marked.startswith('\\\\?\\')
+            assert marked.endswith(str(deep).replace('/', '\\'))
+        else:
+            assert marked == str(deep)
+
+    @pytest.mark.skipif(os.name != 'nt', reason='the limit is a Windows one')
+    def test_a_file_past_the_limit_can_be_opened(self, tmp_path):
+        deep = tmp_path.joinpath(*['a_reasonably_long_folder_name'] * 12)
+        os.makedirs(schema.long_path(str(deep)), exist_ok=True)
+
+        target = os.path.join(str(deep), 'metadata.yaml')
+        assert len(target) > 260
+
+        with open(schema.long_path(target), 'w') as f:
+            f.write('written: true\n')
+
+        # Which is exactly what fails without it
+        with pytest.raises(OSError):
+            open(target)
+
+        with open(schema.long_path(target)) as f:
+            assert yaml.safe_load(f) == {'written': True}
+
+    def test_forward_slashes_are_resolved(self, tmp_path):
+        """The marked form is handed to the filesystem unnormalised, so it has
+        to be an absolute path with no forward slashes left in it."""
+        deep = '/'.join([str(tmp_path)] + ['a_reasonably_long_folder_name'] * 12)
+
+        marked = schema.long_path(deep)
+
+        if os.name == 'nt':
+            assert '/' not in marked
 
 
 class TestFrameTimeMethodRegistry:

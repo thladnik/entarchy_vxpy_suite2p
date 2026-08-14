@@ -493,11 +493,12 @@ class Suite2pSource(ImagingSource):
             roots.append(os.path.join(path, 'ants_registration', 'suite2p'))
 
         for root in roots:
-            if not os.path.isdir(root):
+            if not os.path.isdir(long_path(root)):
                 continue
 
-            for reference in sorted(os.listdir(root)):
-                mapped_path = os.path.join(root, reference, 'mapped_points.h5')
+            for reference in sorted(os.listdir(long_path(root))):
+                mapped_path = long_path(os.path.join(root, reference,
+                                                     'mapped_points.h5'))
                 if os.path.exists(mapped_path):
                     print(f'>> ANTs ROI coordinates from {mapped_path}')
                     return pd.read_hdf(mapped_path, key='coordinates')
@@ -615,14 +616,15 @@ class Suite2PVxPy(entarchy.Entarchy):
                     reg_path = os.path.join(path, 'ants_registration', mov_folder, ref_folder)
 
                     # If there is a transform file, we'll take it
-                    if 'Composite.h5' in os.listdir(reg_path):
+                    if 'Composite.h5' in os.listdir(long_path(reg_path)):
                         valid_reg_path = reg_path
                         break
 
         # Write registration metadata to animal entity
         if valid_reg_path is not None:
             print(f'Loading ANTs registration metadata at {valid_reg_path}')
-            ants_metadata = yaml.safe_load(open(os.path.join(valid_reg_path, 'metadata.yaml'), 'r'))
+            with open(long_path(os.path.join(valid_reg_path, 'metadata.yaml')), 'r') as f:
+                ants_metadata = yaml.safe_load(f)
             animal.update({f'ants/{n}': v for n, v in ants_metadata.items()})
 
         self.commit()
@@ -1146,6 +1148,34 @@ class Suite2PVxPy(entarchy.Entarchy):
     #
     #                     # Commit after each layer
     #                     self.commit()
+
+
+# Where Windows starts refusing paths. Directories cap lower than files, so one
+#  threshold below both is what decides when to ask for the long form.
+_PATH_LIMIT = 240
+
+
+def long_path(path: str) -> str:
+    """A path Windows will open past its 260 character limit.
+
+    ANTs registration output nests a reference image name inside a moving image
+    name, both long and descriptive, so what sits beside them can land a
+    character or two over: `2024-08-02_fish1` has its registration metadata at
+    261. The failure is quiet and misleading - listing the folder still works,
+    while opening a file inside it raises a bare FileNotFoundError - so this is
+    applied wherever the ingest reaches into registration output.
+
+    Returns the path unchanged off Windows, and where it is short enough that
+    the plain form is the better-trodden one.
+    """
+    if os.name != 'nt':
+        return path
+
+    absolute = os.path.abspath(path)
+    if len(absolute) < _PATH_LIMIT or absolute.startswith('\\\\'):
+        return absolute
+
+    return f'\\\\?\\{absolute}'
 
 
 # What a folder may say about itself. Setups differ in what they call the
