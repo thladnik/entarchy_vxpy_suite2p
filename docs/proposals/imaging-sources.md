@@ -110,24 +110,32 @@ hierarchy change. Every source must write:
 
 | attribute | meaning | required |
 |---|---|---|
-| `signal` | the primary fluorescence trace, one sample per frame | yes |
 | `index` | position within its layer | yes |
-| `deconvolved` | spike estimate, if the method produces one | no |
+| `fluorescence` | the trace, one sample per frame | yes |
+| `spikes` | deconvolved activity, if the method produces it | no |
 | `is_unit` | whether the method classifies it as a real cell | no |
+| `unit_probability` | how sure it was | no |
+
+*(Implemented in step 2 with `fluorescence` and `spikes` kept rather than
+renamed to `signal` and `deconvolved`, as first drafted. Neither is suite2p's
+word — suite2p's files are `F.npy` and `spks.npy` — and `roi['signal']` would
+have sat beside `roi['signal_length']` and `roi['signal_proportion']`, which
+the CMN analysis already writes meaning something unrelated. `iscell` was
+suite2p's word, and its packed `[verdict, probability]` row was suite2p's
+format, so that one did get split and renamed.)*
 
 Everything a source knows that is its own stays namespaced as it is now —
 `s2p/npix`, `s2p/skew`, `caiman/SNR_comp`. Nothing is lost; what changes is that
-`signal` means the same thing whoever wrote it.
+these names mean the same thing whoever wrote them.
 
-`calculate_dff` then becomes:
+What remains coupling `calculate_dff` to imaging is structural rather than
+lexical - it reads `roi.recording['imaging_rate']`, which step 3 moves onto the
+`Imaging` entity:
 
 ```python
 def calculate_dff(roi, window_size=120, percentile=10):
     rate = roi.imaging['rate']          # was roi.recording['imaging_rate']
-    signal = roi['signal']              # was roi['fluorescence']
 ```
-
-and stops caring which software produced the ROI.
 
 ### Sources as a registry
 
@@ -265,15 +273,14 @@ that argues with its users about vocabulary loses.
 ## Staging
 
 Each step leaves the suite passing, and the first two are worth doing whether or
-not the rest happens.
+not the rest happens. **Steps 1 and 2 are done.**
 
-1. **Split the ingest.** Pull io/display/camera/phase ingest out of
+1. ~~**Split the ingest.**~~ Pull io/display/camera/phase ingest out of
    `add_recording` into functions that never touch imaging. Add `imaging=None`
    and make the suite2p path conditional. Phases get `start_time`/`end_time`.
    *After this, a behaviour-only recording ingests.*
-2. **Normalise the Roi contract.** `signal`/`deconvolved`/`is_unit`, and move
-   the analysis onto them. Still one hard-coded source.
-   *After this, the analysis no longer names suite2p.*
+2. ~~**Normalise the Roi contract.**~~ Done, and checked at ingest: the CMN
+   analysis now names suite2p nowhere.
 3. **Add the `Imaging` level** and move the timing attributes onto it. One
    source per recording still, but the structure is in place.
 4. **Extract the source interface** and re-implement suite2p behind it.

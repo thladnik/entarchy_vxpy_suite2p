@@ -351,11 +351,23 @@ class TestLayersAndRois:
         assert roi['s2p/skew'] == pytest.approx(0.0)
         assert list(roi['s2p/med']) == [0, 0]
 
-    def test_iscell_is_stored(self, ingested):
+    def test_the_classifier_verdict_is_split_out(self, ingested):
+        """suite2p packs the verdict and its confidence into one two element
+        row; the contract keeps them apart so a source that classifies
+        differently, or not at all, writes the same names."""
         ent, _, _, _ = ingested
 
         roi = ent.get(Roi)[0]
-        assert len(roi['iscell']) == 2
+        assert isinstance(roi['is_unit'], bool)
+        assert 0.0 <= roi['unit_probability'] <= 1.0
+
+    def test_is_unit_is_queryable(self, ingested):
+        """Which is the point of it being a bool rather than a packed array."""
+        ent, dataset, _, _ = ingested
+
+        units = ent.get(Roi, 'is_unit == True')
+
+        assert 0 < len(units) <= len(ent.get(Roi))
 
     def test_spikes_are_stored(self, ingested):
         ent, _, _, _ = ingested
@@ -381,7 +393,8 @@ class TestLayersAndRois:
         ent.add_recording(animal, dataset['recording_path'])
 
         roi = ent.get(Roi)[0]
-        assert 'iscell' not in roi
+        assert 'is_unit' not in roi
+        assert 'unit_probability' not in roi
         assert len(roi['fluorescence']) > 0
 
 
@@ -546,3 +559,137 @@ class TestBehaviourVideo:
         recording = ent.add_recording(animal, dataset['recording_path'])
 
         assert recording.media() == ['camera/fish_embedded/video']
+
+
+class TestRecordingWithoutImaging:
+    """A recording of stimulus, io and behaviour data alone. The ingest used to
+    raise FileNotFoundError from inside itself on a folder with no suite2p/."""
+
+    @pytest.fixture()
+    def behaviour_only(self, tmp_path, ent):
+        dataset = _synthetic_data.build_dataset((tmp_path / 'behaviour').as_posix(),
+                                                with_suite2p=False)
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'])
+        return ent, dataset, recording
+
+    def test_it_ingests(self, behaviour_only):
+        _, _, recording = behaviour_only
+
+        assert recording is not None
+        assert recording['has_imaging'] is False
+
+    def test_no_layers_or_rois(self, behaviour_only):
+        ent, _, _ = behaviour_only
+
+        assert len(ent.get(Layer)) == 0
+        assert len(ent.get(Roi)) == 0
+
+    def test_phases_still_exist(self, behaviour_only):
+        """A stimulation phase is a fact about what was shown, not about the
+        microscope."""
+        ent, dataset, _ = behaviour_only
+
+        phases = ent.get(Phase)
+
+        assert len(phases) == len(dataset['phase_indices'])
+
+    def test_phases_carry_a_time_window(self, behaviour_only):
+        ent, dataset, _ = behaviour_only
+
+        for phase in sorted(ent.get(Phase), key=lambda p: p['index']):
+            expected_start, expected_end = dataset['phase_windows'][phase['index']]
+            assert phase['start_time'] == pytest.approx(expected_start, abs=0.01)
+            assert phase['end_time'] == pytest.approx(expected_end, abs=0.01)
+
+    def test_phases_have_no_frame_window(self, behaviour_only):
+        ent, _, _ = behaviour_only
+
+        assert 'ca_start_index' not in ent.get(Phase)[0]
+
+    def test_no_imaging_timing_on_the_recording(self, behaviour_only):
+        _, _, recording = behaviour_only
+
+        for name in ('imaging_rate', 'ca_times', 'signal_length', 'record_group_ids'):
+            assert name not in recording
+
+    def test_stimulus_and_io_data_are_all_there(self, behaviour_only):
+        _, _, recording = behaviour_only
+
+        assert recording['display/attrs/__protocol_name'] == 'SyntheticProtocol'
+        assert len(recording['io/__record_group_id']) > 0
+        assert recording['display/CMN/seed'] == 42
+
+    def test_the_behaviour_video_is_still_taken_in(self, behaviour_only):
+        _, _, recording = behaviour_only
+
+        assert recording.media() == ['camera/fish_embedded/video']
+
+
+class TestImagingSelection:
+
+    def test_auto_ingests_suite2p_when_present(self, ingested):
+        _, _, _, recording = ingested
+
+        assert recording['has_imaging'] is True
+        assert len(recording.layers) > 0
+
+    def test_none_skips_imaging_that_is_there(self, ent, dataset):
+        animal = ent.add_animal(dataset['animal_path'])
+        recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
+
+        assert recording['has_imaging'] is False
+        assert len(recording.layers) == 0
+        assert len(ent.get(Phase)) == len(dataset['phase_indices'])
+
+    def test_suite2p_requires_it(self, tmp_path, ent):
+        dataset = _synthetic_data.build_dataset((tmp_path / 'none').as_posix(),
+                                                with_suite2p=False)
+        animal = ent.add_animal(dataset['animal_path'])
+
+        with pytest.raises(FileNotFoundError, match='no suite2p plane directories'):
+            ent.add_recording(animal, dataset['recording_path'], imaging='suite2p')
+
+    def test_an_unknown_source_is_refused(self, ent, dataset):
+        animal = ent.add_animal(dataset['animal_path'])
+
+        with pytest.raises(ValueError, match='Unknown imaging source'):
+            ent.add_recording(animal, dataset['recording_path'], imaging='caiman')
+
+    def test_imaging_without_io_is_refused(self, tmp_path, ent):
+        """suite2p output with nothing to time it against is a broken folder,
+        not a recording to ingest quietly."""
+        dataset = _synthetic_data.build_dataset((tmp_path / 'noio').as_posix())
+        os.remove(os.path.join(dataset['recording_path'], 'Io.hdf5'))
+        animal = ent.add_animal(dataset['animal_path'])
+
+        with pytest.raises(FileNotFoundError, match='no Io.hdf5'):
+            ent.add_recording(animal, dataset['recording_path'])
+
+
+class TestPhaseTimeWindows:
+    """Present whether or not there is imaging, and read off the record group
+    trace so they say when the phase ran rather than what was asked for."""
+
+    def test_windows_match_the_record_group_trace(self, ingested):
+        ent, dataset, _, _ = ingested
+
+        for phase in ent.get(Phase):
+            expected_start, expected_end = dataset['phase_windows'][phase['index']]
+            assert phase['start_time'] == pytest.approx(expected_start, abs=0.01)
+            assert phase['end_time'] == pytest.approx(expected_end, abs=0.01)
+
+    def test_windows_are_ordered_and_disjoint(self, ingested):
+        ent, _, _, _ = ingested
+
+        windows = sorted((p['start_time'], p['end_time']) for p in ent.get(Phase))
+
+        for (_, end), (start, _) in zip(windows, windows[1:]):
+            assert end < start
+
+    def test_a_phase_absent_from_the_trace_gets_no_window(self, ingested):
+        """The display log is the source of phases; the io trace is the source
+        of when they ran, and the two can disagree."""
+        ent, _, _, recording = ingested
+
+        assert all('start_time' in phase for phase in ent.get(Phase))

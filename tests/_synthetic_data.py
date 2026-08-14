@@ -211,8 +211,12 @@ def write_suite2p_plane(path, plane_index, roi_num, frame_num):
 def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
                   roi_num=4, plane_num=2, frames_per_plane=None, with_zstack=True,
                   phase_num=None, phase_windows=None, visual_names=None,
-                  with_camera=True, with_video=True):
+                  with_camera=True, with_video=True, with_suite2p=True):
     """Create the folder tree and return a description of what was written.
+
+    `with_suite2p=False` leaves the folder without imaging output, which is a
+    recording of stimulus, io and behaviour data alone - the shape the ingest
+    used to crash on.
 
     Phases default to PHASE_WINDOWS. Pass `phase_num` for that many evenly
     spaced ones, or `phase_windows` to place them yourself. Either way the io
@@ -256,9 +260,10 @@ def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
         frames_per_plane = [shortest] * plane_num
 
     fluorescence = {}
-    for plane_index in range(plane_num):
-        fluorescence[plane_index] = write_suite2p_plane(
-            recording_path, plane_index, roi_num, frames_per_plane[plane_index])
+    if with_suite2p:
+        for plane_index in range(plane_num):
+            fluorescence[plane_index] = write_suite2p_plane(
+                recording_path, plane_index, roi_num, frames_per_plane[plane_index])
 
     return {
         'root': root,
@@ -274,6 +279,7 @@ def build_dataset(root, animal_id='animal_01', recording_id='rec_01',
         'zstack': zstack,
         'phase_indices': sorted(phase_windows),
         'phase_windows': dict(phase_windows),
+        'has_suite2p': with_suite2p,
         'camera_device': 'fish_embedded' if with_camera else None,
         'video_path': (os.path.join(recording_path, 'fish_embedded_frame.avi')
                        if with_camera and with_video else None),

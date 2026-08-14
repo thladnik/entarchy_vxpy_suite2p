@@ -270,11 +270,324 @@ class Suite2PVxPy(entarchy.Entarchy):
 
         return written
 
+    # What a Roi must carry whatever produced it. A source's own vocabulary stays
+    #  namespaced beside these - s2p/npix, caiman/SNR_comp - so nothing is lost;
+    #  what these names buy is that analysis can read a Roi without knowing which
+    #  software segmented it.
+    ROI_REQUIRED = ('index', 'fluorescence')
+    ROI_OPTIONAL = ('spikes', 'is_unit', 'unit_probability')
+
+    def _suite2p_layers(self, path: str) -> list[str]:
+        """The plane directories suite2p wrote, in index order."""
+        suite2p_path = os.path.join(path, 'suite2p')
+        if not os.path.isdir(suite2p_path):
+            return []
+
+        names = [name for name in os.listdir(suite2p_path)
+                 if name.startswith('plane') and os.path.isdir(os.path.join(suite2p_path, name))]
+
+        return sorted(names, key=lambda name: int(name.replace('plane', '')))
+
+    def _read_record_groups(self, path: str):
+        """The stimulation phase id per analog sample, on the io timebase.
+
+        This is what says when each phase actually ran, and it needs no
+        microscope - which is why it is read here rather than inside the imaging
+        ingest, where it used to be resampled onto calcium frames.
+        """
+        io_path = os.path.join(path, 'Io.hdf5')
+        if not os.path.exists(io_path):
+            print('WARNING: no Io.hdf5; phases will have no time windows')
+            return None
+
+        with h5py.File(io_path, 'r') as io_file:
+            if '__record_group_id' in io_file:
+                ids = io_file['__record_group_id'][:].squeeze()
+                times = io_file['__time'][:].squeeze()
+            else:
+                ids = io_file['record_group_id'][:].squeeze()
+                times = io_file['global_time'][:].squeeze()
+
+        return ids, times
+
+    def _imaging_timing(self, path: str, layer_num: int, frame_avg_num, animal: Animal,
+                        recording: Recording, sync_signal: str, sync_signal_time: str,
+                        sync_type: str) -> dict:
+        """When each imaging frame was acquired, per layer.
+
+        Timing is a property of how the microscope scanned, not of the software
+        that segmented the result: the demultiplexing below describes a scanner
+        that visits planes in turn, and would be wrong for a light sheet stack
+        whichever program found the ROIs.
+        """
+        with h5py.File(os.path.join(path, 'Io.hdf5'), 'r') as io_file:
+            sync_data = np.squeeze(io_file[sync_signal])[:]
+            sync_data_times = np.squeeze(io_file[sync_signal_time])[:]
+
+        _, frame_times_all = frame_time_methods[sync_type](sync_data, sync_data_times)
+
+        if isinstance(frame_avg_num, int):
+            frame_avg_num_cur = frame_avg_num
+        else:
+            if not callable(frame_avg_num):
+                raise Exception('frame_avg_num must be int or callable')
+            frame_avg_num_cur = frame_avg_num(animal.id, recording.id)
+
+        frame_times_by_layer = []
+        for layer_idx in range(layer_num):
+            _f_times = frame_times_all[int(layer_idx + frame_avg_num_cur // 2)::(layer_num * frame_avg_num_cur)]
+            frame_times_by_layer.append(_f_times)
+
+        # For now, use frame timing data of first layer for recording-level timing data and phase assignment
+        frame_times = frame_times_by_layer[0].squeeze()
+        # TODO: improve this in future? There is a time offset between layers due to sequential acquisition
+        #  Doing this properly would require LinkEntities between layers and stimulation phases, which is not implemented yet
+
+        dt_frames = np.diff(frame_times).mean()  # seconds
+
+        return {'frame_times_by_layer': frame_times_by_layer,
+                'frame_times': frame_times,
+                'dt_frames': dt_frames,
+                'rate': 1. / dt_frames}
+
+    def _ingest_hdf5_files(self, recording: Recording, path: str, record_groups) -> dict:
+        """Everything the acquisition software wrote, imaging or not.
+
+        Phases are created here rather than in the imaging ingest: a stimulation
+        phase is a fact about what was shown, and a recording with no microscope
+        still has them.
+
+        Returns:
+            dict: the Phase entities, keyed by index.
+        """
+        phase_data = {}
+
+        for data_fn in os.listdir(path):
+            if not any([data_fn.lower().endswith(fn) for fn in ['.h5', 'hdf5']]):
+                continue
+
+            # Get short name for attribute names
+            fn_short = data_fn.split('.')[0].lower()
+            with h5py.File(os.path.join(path, data_fn), 'r') as h5file:
+
+                print(f'> {data_fn}')
+                # Get attributes
+                recording.update({f'{fn_short}/attrs/{k}': v for k, v in h5file.attrs.items()})
+                for key1, member1 in tqdm.tqdm(h5file.items()):
+
+                    # If dataset, save to recording directly
+                    if isinstance(member1, h5py.Dataset):
+                        recording[f'{fn_short}/{key1}'] = np.squeeze(member1[:])
+                        continue
+
+                    # Otherwise it's a group -> keep going
+
+                    # Add phase
+                    if key1.startswith('phase'):
+                        phase_index = int(key1.replace('phase', ''))
+
+                        # Shared across files: two logs describing the same phase
+                        #  contribute attributes to one entity rather than
+                        #  colliding on a second one with the same id
+                        if phase_index in phase_data:
+                            phase = phase_data[phase_index]
+                        else:
+                            phase = Phase(self, _id=key1, _parent=recording)
+                            self.add_new_entity(phase)
+                            phase_data[phase_index] = phase
+                            phase['index'] = phase_index
+
+                            window = _phase_time_window(record_groups, phase_index)
+                            if window is not None:
+                                phase['start_time'], phase['end_time'] = window
+
+                        # Write attributes
+                        for attr_key, attr_value in member1.attrs.items():
+                            phase[f'{fn_short}/{attr_key}'] = attr_value
+
+                        # Write datasets
+                        for key2, member2 in member1.items():
+                            if isinstance(member2, h5py.Dataset):
+                                phase[key2] = np.squeeze(member2[:])
+                            else:
+                                print('WARNING: nested groups in phase not supported yet')
+
+                    # Add other data
+                    else:
+                        # Write attributes
+                        for k, v in member1.attrs.items():
+                            recording[f'{fn_short}/{key1}/{k}'] = v
+
+                        # Write datasets
+                        for key2, member2 in member1.items():
+                            if isinstance(member2, h5py.Dataset):
+                                recording[f'{fn_short}/{key1}/{key2}'] = np.squeeze(member2[:])
+
+        return phase_data
+
+    def _add_phase_frame_windows(self, phases: dict, frame_times: np.ndarray,
+                                 record_group_ids: np.ndarray) -> None:
+        """Which imaging frames fall inside each phase.
+
+        Only meaningful once there are imaging frames, and only unambiguous
+        while there is one source of them - see
+        docs/proposals/imaging-sources.md for where this goes next.
+        """
+        for phase in phases.values():
+            in_phase_indices = np.where(record_group_ids == phase['index'])[0]
+            if len(in_phase_indices) == 0:
+                print(f'WARNING: phase {phase["index"]} covers no imaging frames')
+                continue
+
+            start_index = np.argmin(np.abs(frame_times - frame_times[in_phase_indices[0]]))
+            end_index = np.argmin(np.abs(frame_times - frame_times[in_phase_indices[-1]]))
+            phase['ca_start_index'] = start_index
+            phase['ca_end_index'] = end_index
+
+    def _ingest_suite2p(self, recording: Recording, path: str, layers: list[str],
+                        timing: dict) -> None:
+        """Layers and ROIs from suite2p's output."""
+        layer_num = len(layers)
+        frame_times = timing['frame_times']
+
+        for layer_str in layers:
+
+            # Add layer
+            layer = Layer(self, _id=layer_str, _parent=recording)
+            self.add_new_entity(layer)
+            print(f'> Process {layer}')
+
+            # Get path to plane data
+            s2p_path = os.path.join(path, 'suite2p', layer_str)
+
+            # Get plane index
+            layer_idx = int(layer_str.replace('plane', ''))
+
+            # Get frame times for this layer
+            frame_times = timing['frame_times_by_layer'][layer_idx]
+
+            # Load suite2p's analysis options
+            print('>> Include suite2p ops')
+            ops = np.load(os.path.join(s2p_path, 'ops.npy'), allow_pickle=True).item()
+            unravel_dict(ops, layer, 's2p')
+
+            print('>> Load ROI data')
+            fluorescence = np.load(os.path.join(s2p_path, 'F.npy'), allow_pickle=True)
+            spikes_all = np.load(os.path.join(s2p_path, 'spks.npy'), allow_pickle=True)
+            roi_stats_all = np.load(os.path.join(s2p_path, 'stat.npy'), allow_pickle=True)
+            # In some suite2p versions the iscell file may be missing?
+            try:
+                iscell_all = np.load(os.path.join(s2p_path, 'iscell.npy'), allow_pickle=True)
+            except:
+                iscell_all = None
+
+            # Check if frame times and signal match
+            if frame_times.shape[0] != fluorescence.shape[1]:
+                print(f'Detected frame times length does not match frame count. '
+                      f'Detected frame times: {frame_times.shape[0]} / Frames: {fluorescence.shape[1]}')
+
+                # Shorten signal
+                if frame_times.shape[0] < fluorescence.shape[1]:
+                    fluorescence = fluorescence[:, :frame_times.shape[0]]
+                    print('Truncated signal at end to resolve mismatch. Check debug output to verify')
+
+                # Shorten frame times
+                else:
+                    frame_times = frame_times[:fluorescence.shape[1]]
+                    print('Truncated detected frame times at end to resolve mismatch. Check debug output to verify')
+
+            # Save to recording
+            layer['roi_num'] = fluorescence.shape[0]
+            layer['t_offset'] = layer_idx * timing['dt_frames'] / layer_num
+
+            print('Load anatomical registration data')
+            roi_coordinates = None
+            if 'ants_registration' in os.listdir(os.path.join(path, 'suite2p')):
+                # Check for registration data in each registration subfolder for current plane
+                for fld in os.listdir(os.path.join(path, 'suite2p', 'ants_registration', layer_str)):
+                    registration_path = os.path.join(path, 'suite2p', 'ants_registration', layer_str, fld)
+
+                    # Read coordinates of available
+                    if 'mapped_points.h5' in os.listdir(registration_path):
+                        roi_coordinates = pd.read_hdf(os.path.join(registration_path, 'mapped_points.h5'),
+                                                      key='coordinates')
+
+                        print(f'Found ANTs registration data for  ROI coordinates: {registration_path}')
+                        break
+
+            if roi_coordinates is None:
+                print('WARNING: no ANTs registration data found')
+
+            # Add suite2p's analysis ROI stats
+            print('>> Add ROI stats and signals')
+            for roi_idx in tqdm.tqdm(range(fluorescence.shape[0])):
+                # Create ROI
+                roi = Roi(self, _id=f'Roi_{roi_idx}', _parent=layer)
+                self.add_new_entity(roi)
+                roi['index'] = roi_idx
+
+                roi_stats = roi_stats_all[roi_idx]
+
+                # Write ROI stats
+                roi.update({f's2p/{k}': v for k, v in roi_stats.items()})
+
+                # Write ROI coordinates
+                if roi_coordinates is not None:
+                    coords = roi_coordinates.iloc[roi_idx]
+                    roi.update({'ants/x': float(coords.x), 'ants/y': float(coords.y), 'ants/z': float(coords.z)})
+
+                # Write data
+                roi['fluorescence'] = fluorescence[roi_idx]
+                roi['spikes'] = spikes_all[roi_idx]
+
+                # suite2p packs the classifier's verdict and its confidence into
+                #  one two element row. Split, so that a source which classifies
+                #  differently - or not at all - writes the same names.
+                if iscell_all is not None:
+                    roi['is_unit'] = bool(iscell_all[roi_idx][0])
+                    roi['unit_probability'] = float(iscell_all[roi_idx][1])
+
+            self._check_roi_contract(layer)
+
+        # Add recording-level timing data after layers have been processed
+        #  (frame_times may be truncated to match signal length, so we need to add them after processing layers)
+        recording['signal_length'] = frame_times.shape[0]
+        recording['ca_times'] = frame_times
+
+    def _check_roi_contract(self, layer: Layer) -> None:
+        """Whether a layer's ROIs carry what analysis is entitled to expect.
+
+        Checked on the first ROI of each layer rather than all of them: this
+        catches a source that does not honour the contract, which is a mistake
+        in the source rather than in one ROI, and reading every ROI of a plane
+        to check would cost more than the ingest that wrote them.
+        """
+        rois = layer.rois
+        if len(rois) == 0:
+            return
+
+        missing = [name for name in self.ROI_REQUIRED if name not in rois[0]]
+        if len(missing) > 0:
+            raise RuntimeError(
+                f'{layer} produced ROIs without {missing}. Every imaging source '
+                f'must write {list(self.ROI_REQUIRED)} so that analysis can read '
+                f'an ROI without knowing what segmented it.')
+
     @entarchy.digest_method
     def add_recording(self, animal: Animal, path: str,
                       sync_signal: str = None, sync_signal_time: str = None,
                       sync_type = None, frame_avg_num: int | Callable = 1,
-                      with_video: bool = True) -> Recording | None:
+                      with_video: bool = True, imaging: str = 'auto') -> Recording | None:
+        """Ingest one vxpy recording folder.
+
+        Args:
+            imaging: which imaging source to take signals from. 'auto' ingests
+                suite2p output when the folder has it and skips it otherwise;
+                'suite2p' requires it and fails if it is missing; None ingests
+                no imaging at all, leaving a recording of stimulus, io and
+                behaviour data. See docs/proposals/imaging-sources.md.
+            with_video: take the behaviour videos into the entarchy as media.
+        """
 
         sync_type = 'y_mirror' if sync_type is None else sync_type
 
@@ -300,40 +613,29 @@ class Suite2PVxPy(entarchy.Entarchy):
             print(f'WARNING: {path} does not appear to be vxpy recording folder. Skipping.')
             return None
 
+        if imaging not in (None, 'auto', 'suite2p'):
+            raise ValueError(f'Unknown imaging source "{imaging}". '
+                             f'Use "suite2p", "auto" or None.')
+
+        layers = self._suite2p_layers(path) if imaging is not None else []
+        if imaging == 'suite2p' and len(layers) == 0:
+            raise FileNotFoundError(
+                f'imaging="suite2p" but {path} has no suite2p plane directories. '
+                f'Use imaging="auto" to ingest whatever is there, or None to skip it.')
+
+        with_imaging = len(layers) > 0
+        if with_imaging and not os.path.exists(os.path.join(path, 'Io.hdf5')):
+            raise FileNotFoundError(
+                f'{path} has suite2p output but no Io.hdf5, so its frames cannot '
+                f'be timed. Pass imaging=None to ingest the rest of it.')
+
         print(f'Process recording folder {path}')
 
         with self:
 
-            print('> Calculate frame timing of signal')
-            with h5py.File(os.path.join(path, 'Io.hdf5'), 'r') as io_file:
-
-                sync_data = np.squeeze(io_file[sync_signal])[:]
-                sync_data_times = np.squeeze(io_file[sync_signal_time])[:]
-
-                # Calculate frame timing
-                frame_idcs_all, frame_times_all = frame_time_methods[sync_type](sync_data, sync_data_times)
-
-                # Interpolate record group IDs to imaging frame time
-                try:
-                    record_group_ids = io_file['__record_group_id'][:].squeeze()
-                    record_group_ids_time = io_file['__time'][:].squeeze()
-                except KeyError as _:
-                    # For backwards compatibility to pre-2023 vxpy data
-                    record_group_ids = io_file['record_group_id'][:].squeeze()
-                    record_group_ids_time = io_file['global_time'][:].squeeze()
-
-                ca_rec_group_id_fun = scipy.interpolate.interp1d(record_group_ids_time,
-                                                                 record_group_ids,
-                                                                 kind='nearest')
-
-            # Find all layers in suite2p folder
-            layers = []
-            for _name in os.listdir(os.path.join(path, 'suite2p')):
-                if (not os.path.isdir(os.path.join(path, 'suite2p', _name))
-                        or not _name.startswith('plane')):
-                    continue
-                layers.append(_name)
-            layer_num = len(layers)
+            # When each stimulation phase ran, on the io timebase. Needed whether
+            #  or not there is imaging, so it is read before deciding.
+            record_groups = self._read_record_groups(path)
 
             # Create new recording entity
             recording = Recording(self, _id=recording_id, _parent=animal)
@@ -342,199 +644,34 @@ class Suite2PVxPy(entarchy.Entarchy):
 
             # Add metadata
             add_metadata(recording, path)
+            recording['has_imaging'] = with_imaging
 
-            # Calculate layer times
-            if isinstance(frame_avg_num, int):
-                frame_avg_num_cur = frame_avg_num
-            else:
-                if not callable(frame_avg_num):
-                    raise Exception('frame_avg_num must be int or callable')
+            timing = None
+            if with_imaging:
+                print('> Calculate frame timing of signal')
+                timing = self._imaging_timing(path, len(layers), frame_avg_num, animal,
+                                              recording, sync_signal, sync_signal_time,
+                                              sync_type)
+                recording['imaging_rate'] = timing['rate']
+                print(f'> Estimated, effective imaging rate {timing["rate"]:.2f}Hz')
 
-                frame_avg_num_cur = frame_avg_num(animal.id, recording.id)
+                # Interpolate record_group_ids to frame times
+                ids, times = record_groups
+                on_frames = scipy.interpolate.interp1d(times, ids, kind='nearest')(
+                    timing['frame_times'])
+                recording['record_group_ids'] = on_frames
 
-            frame_times_by_layer = []
-            for layer_idx in range(layer_num):
-                _f_times = frame_times_all[int(layer_idx + frame_avg_num_cur // 2)::(layer_num * frame_avg_num_cur)]
-                frame_times_by_layer.append(_f_times)
+            phases = self._ingest_hdf5_files(recording, path, record_groups)
 
-            # For now, use frame timing data of first layer for recording-level timing data and phase assignment
-            frame_times = frame_times_by_layer[0].squeeze()
-            # TODO: improve this in future? There is a time offset between layers due to sequential acquisition
-            #  Doing this properly would require LinkEntities between layers and stimulation phases, which is not implemented yet
-
-            # Get imaging rate from sync signal
-            dt_frames = np.diff(frame_times).mean()  # seconds
-            imaging_rate = 1. / dt_frames  # Hz
-            recording['imaging_rate'] = imaging_rate
-            print(f'> Estimated, effective imaging rate {imaging_rate:.2f}Hz')
-
-            # Interpolate record_group_ids to frame times
-            record_group_ids = ca_rec_group_id_fun(frame_times)
-            recording['record_group_ids'] = record_group_ids
-
-            for data_fn in os.listdir(path):
-                if not any([data_fn.lower().endswith(fn) for fn in ['.h5', 'hdf5']]):
-                    continue
-
-                # Get short name for attribute names
-                fn_short = data_fn.split('.')[0].lower()
-                phase_data = {}
-                with h5py.File(os.path.join(path, data_fn), 'r') as h5file:
-
-                    print(f'> {data_fn}')
-                    # Get attributes
-                    recording.update({f'{fn_short}/attrs/{k}': v for k, v in h5file.attrs.items()})
-                    for key1, member1 in tqdm.tqdm(h5file.items()):
-
-                        # If dataset, save to recording directly
-                        if isinstance(member1, h5py.Dataset):
-                            recording[f'{fn_short}/{key1}'] = np.squeeze(member1[:])
-                            continue
-
-                        # Otherwise it's a group -> keep going
-
-                        # Add phase
-                        if key1.startswith('phase'):
-
-                            # Get phase entity
-                            if key1 in phase_data:
-                                phase = phase_data[key1]
-                            else:
-                                # Add new phase entity
-                                phase = Phase(self, _id=key1, _parent=recording)
-                                self.add_new_entity(phase)
-                                phase_data[key1] = phase
-                                phase['index'] = int(key1.replace('phase', ''))
-
-                                # Add calcium start/end indices
-                                in_phase_indices = np.where(record_group_ids == phase['index'])[0]
-                                start_index = np.argmin(np.abs(frame_times - frame_times[in_phase_indices[0]]))
-                                end_index = np.argmin(np.abs(frame_times - frame_times[in_phase_indices[-1]]))
-                                phase['ca_start_index'] = start_index
-                                phase['ca_end_index'] = end_index
-
-                            # Write attributes
-                            for attr_key, attr_value in member1.attrs.items():
-                                phase[f'{fn_short}/{attr_key}'] = attr_value
-
-                            # Write datasets
-                            for key2, member2 in member1.items():
-                                if isinstance(member2, h5py.Dataset):
-                                    phase[key2] = np.squeeze(member2[:])
-                                else:
-                                    print('WARNING: nested groups in phase not supported yet')
-
-                        # Add other data
-                        else:
-                            # Write attributes
-                            for k, v in member1.attrs.items():
-                                recording[f'{fn_short}/{key1}/{k}'] = v
-
-                            # Write datasets
-                            for key2, member2 in member1.items():
-                                if isinstance(member2, h5py.Dataset):
-                                    recording[f'{fn_short}/{key1}/{key2}'] = np.squeeze(member2[:])
+            if with_imaging:
+                self._add_phase_frame_windows(phases, timing['frame_times'],
+                                              recording['record_group_ids'])
 
             if with_video:
                 self._add_recording_videos(recording, path)
 
-            for layer_str in layers:
-
-                # Add layer
-                layer = Layer(self, _id=layer_str, _parent=recording)
-                self.add_new_entity(layer)
-                print(f'> Process {layer}')
-
-                # Get path to plane data
-                s2p_path = os.path.join(path, 'suite2p', layer_str)
-
-                # Get plane index
-                layer_idx = int(layer_str.replace('plane', ''))
-
-                # Get frame times for this layer
-                frame_times = frame_times_by_layer[layer_idx]
-
-                # Load suite2p's analysis options
-                print('>> Include suite2p ops')
-                ops = np.load(os.path.join(s2p_path, 'ops.npy'), allow_pickle=True).item()
-                unravel_dict(ops, layer, 's2p')
-
-                print('>> Load ROI data')
-                fluorescence = np.load(os.path.join(s2p_path, 'F.npy'), allow_pickle=True)
-                spikes_all = np.load(os.path.join(s2p_path, 'spks.npy'), allow_pickle=True)
-                roi_stats_all = np.load(os.path.join(s2p_path, 'stat.npy'), allow_pickle=True)
-                # In some suite2p versions the iscell file may be missing?
-                try:
-                    iscell_all = np.load(os.path.join(s2p_path, 'iscell.npy'), allow_pickle=True)
-                except:
-                    iscell_all = None
-
-                # Check if frame times and signal match
-                if frame_times.shape[0] != fluorescence.shape[1]:
-                    print(f'Detected frame times length does not match frame count. '
-                          f'Detected frame times: {frame_times.shape[0]} / Frames: {fluorescence.shape[1]}')
-
-                    # Shorten signal
-                    if frame_times.shape[0] < fluorescence.shape[1]:
-                        fluorescence = fluorescence[:, :frame_times.shape[0]]
-                        print('Truncated signal at end to resolve mismatch. Check debug output to verify')
-
-                    # Shorten frame times
-                    else:
-                        frame_times = frame_times[:fluorescence.shape[1]]
-                        print('Truncated detected frame times at end to resolve mismatch. Check debug output to verify')
-
-                # Save to recording
-                layer['roi_num'] = fluorescence.shape[0]
-                layer['t_offset'] = layer_idx * dt_frames / layer_num
-
-                print('Load anatomical registration data')
-                roi_coordinates = None
-                if 'ants_registration' in os.listdir(os.path.join(path, 'suite2p')):
-                    # Check for registration data in each registration subfolder for current plane
-                    for fld in os.listdir(os.path.join(path, 'suite2p', 'ants_registration', layer_str)):
-                        registration_path = os.path.join(path, 'suite2p', 'ants_registration', layer_str, fld)
-
-                        # Read coordinates of available
-                        if 'mapped_points.h5' in os.listdir(registration_path):
-                            roi_coordinates = pd.read_hdf(os.path.join(registration_path, 'mapped_points.h5'),
-                                                          key='coordinates')
-
-                            print(f'Found ANTs registration data for  ROI coordinates: {registration_path}')
-                            break
-
-                if roi_coordinates is None:
-                    print('WARNING: no ANTs registration data found')
-
-                # Add suite2p's analysis ROI stats
-                print('>> Add ROI stats and signals')
-                for roi_idx in tqdm.tqdm(range(fluorescence.shape[0])):
-                    # Create ROI
-                    roi = Roi(self, _id=f'Roi_{roi_idx}', _parent=layer)
-                    self.add_new_entity(roi)
-                    roi['index'] = roi_idx
-
-                    roi_stats = roi_stats_all[roi_idx]
-
-                    # Write ROI stats
-                    roi.update({f's2p/{k}': v for k, v in roi_stats.items()})
-
-                    # Write ROI coordinates
-                    if roi_coordinates is not None:
-                        coords = roi_coordinates.iloc[roi_idx]
-                        roi.update({'ants/x': float(coords.x), 'ants/y': float(coords.y), 'ants/z': float(coords.z)})
-
-                    # Write data
-                    roi['fluorescence'] = fluorescence[roi_idx]
-                    roi['spikes'] = spikes_all[roi_idx]
-
-                    if iscell_all is not None:
-                        roi['iscell'] = iscell_all[roi_idx]
-
-            # Add recording-level timing data after layers have been processed
-            #  (frame_times may be truncated to match signal length, so we need to add them after processing layers)
-            recording['signal_length'] = frame_times.shape[0]
-            recording['ca_times'] = frame_times
+            if with_imaging:
+                self._ingest_suite2p(recording, path, layers, timing)
 
         return recording
 
@@ -696,6 +833,24 @@ def add_metadata(entity: entarchy.Entity, folder_path: str):
 
     # Add metadata
     unravel_dict(metadata, entity, 'metadata')
+
+
+def _phase_time_window(record_groups, index: int):
+    """When a stimulation phase started and ended, in seconds.
+
+    Read off the record group trace, so it says when the phase actually ran
+    rather than what the protocol asked for - and needs no microscope, which is
+    the point: a phase is a fact about the stimulus.
+    """
+    if record_groups is None:
+        return None
+
+    ids, times = record_groups
+    inside = np.where(ids == index)[0]
+    if len(inside) == 0:
+        return None
+
+    return float(times[inside[0]]), float(times[inside[-1]])
 
 
 def unravel_dict(dict_data: dict, entity: entarchy.Entity, path: str):

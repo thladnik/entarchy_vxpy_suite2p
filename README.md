@@ -14,15 +14,44 @@ ent.add_recording(animal, '/data/animal_01/rec_01')
 ```
 
 `add_recording` expects a vxpy recording folder containing `Io.hdf5` (with the
-galvo mirror sync signal), the stimulus log HDF5 files, and a `suite2p/planeN/`
-directory per imaging layer. Behaviour videos beside them are taken into the
-entarchy as media attributes; pass `with_video=False` to skip that.
+galvo mirror sync signal) and the stimulus log HDF5 files. Behaviour videos
+beside them are taken into the entarchy as media attributes; pass
+`with_video=False` to skip that.
 
-That imaging is present, and that suite2p produced it, are currently
-assumptions rather than options —
-[a proposal](docs/proposals/imaging-sources.md) sets out what it would take to
-make a recording work without imaging and to ingest signals from more than one
-source.
+**Imaging is optional.** A recording of stimulus, io and behaviour data alone
+ingests completely — phases included, since a stimulation phase is a fact about
+what was shown rather than about the microscope.
+
+```python
+ent.add_recording(animal, path)                     # suite2p if the folder has it
+ent.add_recording(animal, path, imaging='suite2p')  # require it
+ent.add_recording(animal, path, imaging=None)       # skip it
+```
+
+Phases always carry `start_time` and `end_time` in seconds, read off the record
+group trace so they say when the phase actually ran. `ca_start_index` /
+`ca_end_index` are added only when there are imaging frames to index.
+
+### What an ROI carries
+
+Whatever segmented it, an ROI has:
+
+| attribute | |
+|---|---|
+| `index` | position within its layer — required |
+| `fluorescence` | the trace, one sample per frame — required |
+| `spikes` | deconvolved activity, if the method produces it |
+| `is_unit` | whether the method calls it a real cell |
+| `unit_probability` | how sure it was |
+
+A source's own vocabulary stays namespaced beside these — `s2p/npix`,
+`s2p/skew` — so nothing is lost. What the shared names buy is analysis that
+reads an ROI without knowing what produced it, which is why the CMN analysis
+mentions suite2p nowhere. The required names are checked at ingest.
+
+Making the source itself a choice, rather than suite2p with the serial numbers
+filed off, is [a proposal](docs/proposals/imaging-sources.md); this is the first
+two steps of it.
 
 ### Example notebook
 
