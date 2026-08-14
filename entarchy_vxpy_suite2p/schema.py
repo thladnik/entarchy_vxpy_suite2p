@@ -17,7 +17,9 @@ import entarchy
 __all__ = ['Suite2PVxPy',
            'Animal', 'Recording', 'Imaging', 'Layer', 'Roi', 'Phase',
            'AnimalCollection', 'RecordingCollection', 'ImagingCollection',
-           'LayerCollection', 'RoiCollection', 'PhaseCollection']
+           'LayerCollection', 'RoiCollection', 'PhaseCollection',
+           'ImagingSource', 'Suite2pSource', 'ImagingSpec', 'imaging_sources',
+           'FrameTiming', 'SyncSignalTiming', 'ClockDivisionTiming', 'CameraTiming']
 
 
 # C = TypeVar("C", bound=schema.Collection)
@@ -277,6 +279,58 @@ class SyncSignalTiming(FrameTiming):
                 for layer_idx in range(layer_num)]
 
 
+class ClockDivisionTiming(FrameTiming):
+    """Frame times from a sync line that ticks at a fixed multiple of the rate.
+
+    Not every frame sync pulses once per acquired slice. A scanner whose slow
+    axis free-runs keeps emitting its frame clock through the piezo flyback, so
+    the line ticks evenly for exactly as long as the acquisition lasts while
+    only some of those ticks are frames that were kept. Such a line still times
+    the frames - it has to be divided rather than counted.
+
+    `edges_per_volume` is that ratio and need not be a whole number, which is
+    the point: it is the volume period measured in clock ticks, and a volume
+    that is not phase-locked to the clock gives a fraction. Measure it as
+    (edges / volumes) on a recording where both are known, then check that it
+    reproduces the frame count of the others.
+    """
+    name = 'clock_division'
+
+    def __init__(self, edges_per_volume: float, signal: str = 'di_frame_sync',
+                 signal_time: str = None):
+        if edges_per_volume <= 0:
+            raise ValueError('edges_per_volume must be positive, '
+                             f'got {edges_per_volume}.')
+
+        self.edges_per_volume = float(edges_per_volume)
+        self.signal = signal
+        self.signal_time = f'{signal}_time' if signal_time is None else signal_time
+
+    def edge_times(self, path: str) -> np.ndarray:
+        with h5py.File(os.path.join(path, 'Io.hdf5'), 'r') as io_file:
+            sync_data = np.squeeze(io_file[self.signal])[:]
+            sync_data_times = np.squeeze(io_file[self.signal_time])[:]
+
+        return ca_frame_times_from_sync_toggle(sync_data, sync_data_times)[1]
+
+    def frame_times(self, path: str, layer_num: int) -> list:
+        edges = self.edge_times(path)
+        if len(edges) < 2:
+            raise ValueError(f'The sync line "{self.signal}" in {path} has '
+                             f'{len(edges)} edges, so it cannot time anything.')
+
+        # Ride the clock rather than a nominal rate, so that a clock which is
+        #  slightly off nominal does not accumulate drift across the recording
+        volume_num = int((len(edges) - 1) / self.edges_per_volume) + 1
+        positions = np.arange(volume_num) * self.edges_per_volume
+        times = np.interp(positions, np.arange(len(edges)), edges)
+
+        # Planes are visited in turn within a volume
+        slice_dt = np.median(np.diff(times)) / layer_num
+
+        return [times + layer_idx * slice_dt for layer_idx in range(layer_num)]
+
+
 class CameraTiming(FrameTiming):
     """Frame times the camera itself recorded, for a source that is not scanned.
 
@@ -422,22 +476,33 @@ class Suite2pSource(ImagingSource):
         imaging['frame_num'] = frame_times.shape[0]
 
     def _registration_coordinates(self, path: str, layer_str: str):
-        """ANTs-registered ROI coordinates for a plane, if any were computed."""
-        print('Load anatomical registration data')
-        if 'ants_registration' not in os.listdir(os.path.join(path, 'suite2p')):
-            print('WARNING: no ANTs registration data found')
-            return None
+        """ANTs-registered ROI coordinates for a plane, if any were computed.
 
-        for fld in os.listdir(os.path.join(path, 'suite2p', 'ants_registration', layer_str)):
-            registration_path = os.path.join(path, 'suite2p', 'ants_registration',
-                                             layer_str, fld)
+        Two layouts are in use. Registration run per plane names the plane in
+        the path; registration run once over the whole extraction names what was
+        registered instead, which is the suite2p folder:
 
-            if 'mapped_points.h5' in os.listdir(registration_path):
-                print(f'Found ANTs registration data for  ROI coordinates: {registration_path}')
-                return pd.read_hdf(os.path.join(registration_path, 'mapped_points.h5'),
-                                   key='coordinates')
+            <rec>/suite2p/ants_registration/<plane>/<reference>/mapped_points.h5
+            <rec>/ants_registration/suite2p/<reference>/mapped_points.h5
 
-        print('WARNING: no ANTs registration data found')
+        The second says nothing about planes, so it is only read when there is
+        one - otherwise every plane would be handed the same coordinates.
+        """
+        roots = [os.path.join(path, 'suite2p', 'ants_registration', layer_str)]
+        if len(self.layer_names(path)) == 1:
+            roots.append(os.path.join(path, 'ants_registration', 'suite2p'))
+
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+
+            for reference in sorted(os.listdir(root)):
+                mapped_path = os.path.join(root, reference, 'mapped_points.h5')
+                if os.path.exists(mapped_path):
+                    print(f'>> ANTs ROI coordinates from {mapped_path}')
+                    return pd.read_hdf(mapped_path, key='coordinates')
+
+        print(f'>> No ANTs ROI coordinates for {layer_str}')
         return None
 
 
@@ -623,59 +688,6 @@ class Suite2PVxPy(entarchy.Entarchy):
     #  software segmented it.
     ROI_REQUIRED = ('index', 'fluorescence')
     ROI_OPTIONAL = ('spikes', 'is_unit', 'unit_probability')
-
-    # Behaviour cameras write one video per device beside the HDF5 files, named
-    #  after the device that produced it: fish_embedded -> fish_embedded_frame.avi
-    VIDEO_SUFFIXES = ('.avi', '.mp4', '.mkv', '.mov')
-
-    def _camera_devices(self, path: str) -> list[str]:
-        """The camera devices Camera.hdf5 says this recording used."""
-        camera_path = next((os.path.join(path, name) for name in os.listdir(path)
-                            if name.lower() == 'camera.hdf5'), None)
-        if camera_path is None:
-            return []
-
-        with h5py.File(camera_path, 'r') as h5file:
-            devices = h5file.attrs.get('__camera_device_list', [])
-
-        return [str(device) for device in devices]
-
-    def _add_recording_videos(self, recording: Recording, path: str) -> list[str]:
-        """Take the behaviour videos of a recording into the entarchy.
-
-        Camera.hdf5 already carries the frame times and whatever tracking ran on
-        the video; what it does not carry is the video. Without it the frames
-        behind `tail_pose_data` cannot be looked at again, and an entarchy is
-        meant to hold everything it needs.
-
-        Videos are copied, never moved - an ingest must not consume the raw data
-        it was pointed at. Files are matched to the camera devices the recording
-        declares, so a video that is an output rather than an acquisition (a
-        stimulus animation dropped in the folder, say) is left alone.
-
-        Returns:
-            list of str: the attribute names written.
-        """
-        entries = {name.lower(): name for name in os.listdir(path)}
-        written = []
-
-        for device in self._camera_devices(path):
-            for suffix in self.VIDEO_SUFFIXES:
-                candidate = entries.get(f'{device}_frame{suffix}'.lower())
-                if candidate is None:
-                    continue
-
-                name = f'camera/{device}/video'
-                source = os.path.join(path, candidate)
-                print(f'> Take in {candidate} '
-                      f'({os.path.getsize(source) / 1024 ** 2:.1f} MB)')
-                recording.set_media(name, source)
-                written.append(name)
-                break
-            else:
-                print(f'WARNING: camera device "{device}" has no video file in {path}')
-
-        return written
 
     def _read_record_groups(self, path: str):
         """The stimulation phase id per analog sample, on the io timebase.
@@ -1136,14 +1148,21 @@ class Suite2PVxPy(entarchy.Entarchy):
     #                     self.commit()
 
 
+# What a folder may say about itself. Setups differ in what they call the
+#  sidecar they write - a recording depth is under `info.yaml` in one and
+#  `metadata.yaml` in another - so both are read and neither is lost.
+METADATA_FILE_NAMES = ('metadata.yaml', 'info.yaml')
+
+
 def add_metadata(entity: entarchy.Entity, folder_path: str):
     """Function searches for and returns metadata on a given folder path
 
-    Function scans the `folder_path` for metadata yaml files (ending in `meta.yaml`)
-    and returns a dictionary containing their contents
+    Function scans the `folder_path` for metadata yaml files (see
+    `METADATA_FILE_NAMES`) and returns a dictionary containing their contents
     """
 
-    meta_files = [f for f in os.listdir(folder_path) if f.endswith('metadata.yaml')]
+    meta_files = [f for f in os.listdir(folder_path)
+                  if f.endswith(METADATA_FILE_NAMES)]
 
     print(f'Found {len(meta_files)} metadata files in {folder_path}.')
 
@@ -1209,7 +1228,16 @@ def ca_frame_times_from_y_mirror(mirror_position: np.ndarray, mirror_time: np.nd
 
 
 def ca_frame_times_from_sync_toggle(sync_signal: np.ndarray, sync_time: np.ndarray):
-    frame_indices = np.where(np.diff(sync_signal) > 0)
+    """Frame times from the rising edges of a digital frame sync line.
+
+    A digital line is recorded as bool, and np.diff of a bool array is XOR: a
+    fall reads as True just as a rise does, so every frame would be counted
+    twice. Widening to a signed type first makes a fall negative again.
+
+    np.diff reports the gap between samples i and i+1, so the rising sample -
+    the first one recorded while the frame was being acquired - is i+1.
+    """
+    frame_indices = np.where(np.diff(sync_signal.astype(np.int8)) > 0)[0] + 1
     frame_times = sync_time[frame_indices]
 
     return frame_indices, frame_times
