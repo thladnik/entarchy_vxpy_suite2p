@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 import pathlib
-from typing import Callable, TypeVar, cast
+from typing import Callable, TypeVar, cast, overload
 
 import h5py
 import numpy as np
@@ -22,35 +22,58 @@ __all__ = ['Suite2PVxPy',
            'FrameTiming', 'SyncSignalTiming', 'ClockDivisionTiming', 'CameraTiming']
 
 
-# C = TypeVar("C", bound=schema.Collection)
-# def get_collection_as(ent: schema.Entarchy, entity_type: type[schema.Entity], *expr, **kw) -> C:
-#     return cast(C, ent.get(entity_type, *expr, **kw))
+# Each names the entity it holds, so that indexing and iterating one gives that
+#  entity rather than the base class - recording.phases[0] is a Phase, and a
+#  Phase's own properties complete. The names are quoted because every
+#  collection here is declared before the entity it holds.
 
 
-class AnimalCollection(entarchy.Collection):
+class AnimalCollection(entarchy.Collection['Animal']):
     pass
 
 
-class RecordingCollection(entarchy.Collection):
+class RecordingCollection(entarchy.Collection['Recording']):
     pass
 
 
-class LayerCollection(entarchy.Collection):
+class LayerCollection(entarchy.Collection['Layer']):
     pass
 
 
-class RoiCollection(entarchy.Collection):
+class RoiCollection(entarchy.Collection['Roi']):
     pass
 
 
-class PhaseCollection(entarchy.Collection):
+class PhaseCollection(entarchy.Collection['Phase']):
     pass
 
 
-class ImagingCollection(entarchy.Collection):
+class ImagingCollection(entarchy.Collection['Imaging']):
 
-    def __getitem__(self, item):
-        """Also addressable by source name, since that is what an Imaging is."""
+    @overload
+    def __getitem__(self, item: str) -> 'Imaging': ...
+
+    @overload
+    def __getitem__(self, item: int) -> 'Imaging': ...
+
+    @overload
+    def __getitem__(self, item: slice) -> list['Imaging']: ...
+
+    @overload
+    def __getitem__(self, item: list) -> pd.DataFrame: ...
+
+    def __getitem__(self, item):  # type: ignore[override]
+        """Also addressable by source name, since that is what an Imaging is.
+
+        Which is why the overloads are spelled out here rather than inherited:
+        on any other collection a string names an attribute and gives its
+        values, and on this one it names a source and gives that source.
+
+        A type checker is right to call that an incompatible override, and the
+        ignore above is the record of it being deliberate. The way to be rid of
+        it would be a named method - imaging.by_source('ca') - leaving the
+        brackets meaning what they mean everywhere else.
+        """
         if isinstance(item, str):
             matching = [imaging for imaging in self if imaging.id == item]
             if len(matching) == 0:
