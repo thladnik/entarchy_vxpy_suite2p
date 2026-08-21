@@ -62,6 +62,9 @@ dev = [
     'asdf',
 ]
 
+[project.scripts]
+entarchy-vxpy = 'entarchy_vxpy_suite2p.cli:main'
+
 [tool.setuptools.packages.find]
 where = ['.']
 include = ['entarchy_vxpy_suite2p*']

@@ -22,10 +22,16 @@ if it holds at least one recording, which leaves out `ants_registration` and
 anything else in the tree. `scan_experiment(path)` returns the same reading
 without ingesting anything, for a look before a run that takes hours.
 
-Re-running continues rather than duplicating — animals and recordings that are
-already there are skipped — so an ingest that stopped is resumed by running it
-again. A folder that fails is reported and the run carries on; `skip_broken=False`
-re-raises instead.
+**An experiment is not ingested once.** It is recorded over days, and the folder
+is handed back with more in it than last time. Re-running scans the folder again
+and takes in what is new: a new animal, or a new recording of an animal already
+there. What is already in the entarchy is skipped rather than duplicated, so an
+ingest that stopped is also resumed by running it again. A folder that fails is
+reported and the run carries on; `skip_broken=False` re-raises instead.
+
+An existing animal is skipped whole, so a zstack or an ANTs registration that
+arrived after its first ingest is not picked up by a later run.
+`update_roi_coordinates_from_registration` exists for the registration case.
 
 The levels are separately available, each taking its parent first:
 
@@ -33,6 +39,37 @@ The levels are separately available, each taking its parent first:
 animal = ent.add_animal('cmn', '/data/cmn/2024-08-02_fish1')
 ent.add_recording(animal, '/data/cmn/2024-08-02_fish1/rec_01')
 ```
+
+### From the command line
+
+```bash
+python -m entarchy_vxpy_suite2p create /data/entarchy
+python -m entarchy_vxpy_suite2p add /data/entarchy /raw/cmn
+python -m entarchy_vxpy_suite2p scan /raw/cmn
+```
+
+`add` takes `--name`, `--limit`, `--no-video`, `--dry-run`, `--stop-on-error`, and
+`--create` to make the entarchy on the way in. Without `--create` a path that
+holds no entarchy is an error rather than a new empty one, so a typo costs
+nothing.
+
+Frame timing is named rather than guessed:
+
+```bash
+python -m entarchy_vxpy_suite2p add /data/entarchy /raw/rot_trans \
+    --imaging suite2p --timing clock-division \
+    --edges-per-volume 7.5 --signal di_frame_sync
+```
+
+Options that would be silently ignored are refused — `--signal` without
+`--timing`, `--timing clock-division` without its measured ratio, any timing
+option under `--imaging auto` — and all of that is checked before the entarchy is
+opened, so a mistake costs nothing rather than half a run. `add` exits non-zero
+and names any recording in the folder that did not make it in.
+
+`--backend mysql` with `--dbname/--dbhost/--dbuser` creates on a server instead.
+The password is never an argument: it comes from `ENTARCHY_DB_PASSWORD` or a
+prompt, and is not written to `entarchy.yaml`.
 
 **Frame timing is chosen per experiment, and recorded there.** It cannot be
 detected — a rig that recorded no galvo mirror trace has to be timed from a

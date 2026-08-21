@@ -217,21 +217,171 @@ class TestAddExperiment:
             ent.add_experiment(dataset['root'], skip_broken=False)
 
 
+class TestAddingToAnExperimentThatExists:
+    """An experiment is not ingested once. It is recorded over days, and the
+    folder is handed back with more in it than the last time."""
+
+    def test_new_recordings_and_new_animals_are_picked_up(self, ent, tmp_path):
+        root = (tmp_path / 'growing').as_posix()
+        _synthetic_data.build_dataset(root, animal_id='fish1', recording_id='rec_01')
+
+        experiment = ent.add_experiment(root, skip_broken=False)
+        assert len(experiment.animals) == 1
+        assert len(experiment.recordings) == 1
+        already_there = {recording.uuid for recording in experiment.recordings}
+
+        # The next day: another recording of the same animal, and a new animal
+        _synthetic_data.build_dataset(root, animal_id='fish1', recording_id='rec_02')
+        _synthetic_data.build_dataset(root, animal_id='fish2', recording_id='rec_01')
+
+        ent.add_experiment(root, skip_broken=False)
+
+        assert len(experiment.animals) == 2
+        assert len(experiment.recordings) == 3
+        assert sorted(a.id for a in experiment.animals) == ['fish1', 'fish2']
+
+        # What was already in there is the same entity, not ingested a second time
+        assert already_there < {recording.uuid for recording in experiment.recordings}
+
+    def test_the_second_run_only_ingests_what_is_new(self, ent, tmp_path):
+        root = (tmp_path / 'growing').as_posix()
+        _synthetic_data.build_dataset(root, animal_id='fish1', recording_id='rec_01')
+        ent.add_experiment(root, skip_broken=False)
+
+        rois_after_one = len(ent.get(Roi))
+
+        _synthetic_data.build_dataset(root, animal_id='fish1', recording_id='rec_02')
+        ent.add_experiment(root, skip_broken=False)
+
+        # Doubled rather than tripled: rec_01 was not ingested again
+        assert len(ent.get(Roi)) == 2 * rois_after_one
+
+    def test_an_animal_that_gains_a_recording_keeps_its_uuid(self, ent, tmp_path):
+        root = (tmp_path / 'growing').as_posix()
+        _synthetic_data.build_dataset(root, animal_id='fish1', recording_id='rec_01')
+        first = ent.add_experiment(root, skip_broken=False).animals[0]
+
+        _synthetic_data.build_dataset(root, animal_id='fish1', recording_id='rec_02')
+        second = ent.add_experiment(root, skip_broken=False).animals[0]
+
+        assert first.uuid == second.uuid
+        assert len(second.recordings) == 2
+
+
+class TestTheImagingChoiceCannotSilentlyChange:
+    """The second run is where somebody reaches for the default, which would
+    time the new recordings differently from the ones already in there."""
+
+    def test_the_same_choice_again_is_fine(self, ent, dataset):
+        spec = ImagingSpec(source='suite2p')
+        ent.add_experiment(dataset['root'], imaging=spec, skip_broken=False)
+        ent.add_experiment(dataset['root'], imaging=ImagingSpec(source='suite2p'),
+                           skip_broken=False)
+
+        assert len(ent.get(Experiment)) == 1
+
+    def test_naming_the_default_timing_is_not_a_different_choice(self, ent,
+                                                                 dataset):
+        """Otherwise the guard cries wolf at the spelling rather than the
+        choice, and somebody learns to work around it."""
+        from entarchy_vxpy_suite2p.schema import SyncSignalTiming
+
+        ent.add_experiment(dataset['root'], imaging=ImagingSpec(source='suite2p'),
+                           skip_broken=False)
+
+        # The same thing said out loud: sync_signal is the suite2p default
+        ent.add_experiment(dataset['root'], skip_broken=False,
+                           imaging=ImagingSpec(source='suite2p',
+                                               timing=SyncSignalTiming()))
+
+        assert len(ent.get(Experiment)) == 1
+
+    def test_a_different_timing_is_refused(self, ent, dataset):
+        """The guard fires before anything is ingested, so the second choice
+        only has to be nameable rather than readable off this fixture."""
+        from entarchy_vxpy_suite2p.schema import ClockDivisionTiming
+
+        ent.add_experiment(dataset['root'], imaging=ImagingSpec(source='suite2p'),
+                           skip_broken=False)
+
+        with pytest.raises(ValueError, match='a different imaging choice'):
+            ent.add_experiment(dataset['root'], skip_broken=False,
+                               imaging=ImagingSpec(timing=ClockDivisionTiming(7.5)))
+
+    def test_falling_back_to_auto_is_refused(self, ent, dataset):
+        """The likeliest mistake: the spec lives in a script nobody re-ran."""
+        ent.add_experiment(dataset['root'], imaging=ImagingSpec(source='suite2p'),
+                           skip_broken=False)
+
+        with pytest.raises(ValueError, match='a different imaging choice'):
+            ent.add_experiment(dataset['root'], imaging='auto', skip_broken=False)
+
+    def test_the_message_names_what_differs(self, ent, dataset):
+        ent.add_experiment(dataset['root'], skip_broken=False,
+                           imaging=ImagingSpec(source='suite2p', frame_avg_num=1))
+
+        with pytest.raises(ValueError) as caught:
+            ent.add_experiment(dataset['root'], skip_broken=False,
+                               imaging=ImagingSpec(source='suite2p', frame_avg_num=3))
+
+        message = str(caught.value)
+        assert 'frame_avg_num' in message
+        assert 'was 1, now 3' in message
+        assert 'name a new experiment' in message
+        # It says how much is already committed to the old choice
+        assert '1 recordings' in message
+
+    def test_a_new_name_is_the_way_out(self, ent, dataset):
+        ent.add_experiment(dataset['root'], imaging=ImagingSpec(source='suite2p'),
+                           skip_broken=False)
+        without = ent.add_experiment(dataset['root'], name='no_imaging',
+                                     imaging=None, skip_broken=False)
+
+        assert without['imaging'] == 'none'
+        assert len(without.rois) == 0
+        assert len(ent.get(Experiment)) == 2
+
+
 class TestImagingChoiceIsRecorded:
     """How frames were timed cannot be detected, so it has to be written down."""
 
     def test_an_explicit_timing_is_stored_on_the_experiment(self, ent, dataset):
-        from entarchy_vxpy_suite2p.schema import ClockDivisionTiming
+        from entarchy_vxpy_suite2p.schema import SyncSignalTiming
 
         spec = ImagingSpec(source='suite2p',
-                           timing=ClockDivisionTiming(7.5, signal='di_frame_sync'))
-        experiment = ent.add_experiment(dataset['root'], imaging=spec)
+                           timing=SyncSignalTiming(method='y_mirror',
+                                                   signal='ai_y_mirror_in'))
+        experiment = ent.add_experiment(dataset['root'], imaging=spec,
+                                        skip_broken=False)
 
         assert experiment['imaging'] == 'suite2p'
         assert experiment['imaging/suite2p/source'] == 'suite2p'
-        assert experiment['imaging/suite2p/timing/type'] == 'ClockDivisionTiming'
-        assert experiment['imaging/suite2p/timing/edges_per_volume'] == 7.5
-        assert experiment['imaging/suite2p/timing/signal'] == 'di_frame_sync'
+        assert experiment['imaging/suite2p/timing/type'] == 'SyncSignalTiming'
+        assert experiment['imaging/suite2p/timing/method'] == 'y_mirror'
+        assert experiment['imaging/suite2p/timing/signal'] == 'ai_y_mirror_in'
+        # and it is a record of an ingest that worked, not of one that failed
+        assert len(experiment.rois) > 0
+
+    def test_an_unknown_timing_is_caught_before_anything_is_ingested(self, ent,
+                                                                     dataset):
+        """Recording the choice means resolving it, which means a name that
+        resolves to nothing fails now rather than on the first recording."""
+        spec = ImagingSpec(source='suite2p', timing='no_such_timing')
+
+        with pytest.raises(ValueError, match='Unknown frame timing'):
+            ent.add_experiment(dataset['root'], imaging=spec)
+
+        assert len(ent.get(Recording)) == 0
+
+    def test_a_timing_that_varies_per_recording_says_so(self, ent, dataset):
+        """frame_avg_num may be a function of the animal and recording, and
+        then there is no one timing that holds for the experiment."""
+        spec = ImagingSpec(source='suite2p',
+                           frame_avg_num=lambda animal, recording: 1)
+        experiment = ent.add_experiment(dataset['root'], imaging=spec,
+                                        skip_broken=False)
+
+        assert experiment['imaging/suite2p/timing/type'] == 'per recording'
 
     def test_auto_says_so(self, ent, dataset):
         experiment = ent.add_experiment(dataset['root'], imaging='auto')

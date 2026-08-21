@@ -619,6 +619,26 @@ class ImagingSpec:
 
         raise ValueError(f'Unknown frame timing "{name}". Pass a FrameTiming instance.')
 
+    def resolved_timing(self) -> FrameTiming | None:
+        """The timing this spec will use, where that does not depend on
+        which recording is being read.
+
+        Naming the source default explicitly and leaving it out are the
+        same choice, so an ingest that records what a spec resolved to
+        rather than what it was handed does not see a difference where
+        there is none. None when `frame_avg_num` is a function of the
+        animal and recording, since then there is no one timing to name.
+        """
+        if isinstance(self._timing, FrameTiming):
+            return self._timing
+
+        if callable(self.frame_avg_num):
+            return None
+
+        # timing_for only reaches for those two when frame_avg_num is a
+        #  function of them, which it is not here
+        return self.timing_for(None, None)
+
     def __repr__(self):
         return f'ImagingSpec({self.name}, source={self.source.name})'
 
@@ -796,6 +816,36 @@ class Suite2PVxPy(entarchy.Entarchy):
 
         return experiment
 
+    def _imaging_record(self, imaging, path: str) -> dict:
+        """How frames are timed, flattened into attribute names and values."""
+        if imaging is None:
+            return {'imaging': 'none'}
+
+        if isinstance(imaging, str) and imaging == 'auto':
+            return {'imaging': 'auto'}
+
+        specs = self._imaging_specs(imaging, path)
+        record = {'imaging': ', '.join(spec.name for spec in specs)}
+
+        for spec in specs:
+            prefix = f'imaging/{spec.name}'
+            record[f'{prefix}/source'] = spec.source.name
+
+            # What it resolves to rather than what it was handed, so that
+            #  naming the default and leaving it out record the same thing.
+            #  None when the timing varies per recording, and then there is
+            #  nothing about it that holds for the experiment
+            timing = spec.resolved_timing()
+            if timing is None:
+                record[f'{prefix}/timing/type'] = 'per recording'
+                continue
+
+            record[f'{prefix}/timing/type'] = type(timing).__name__
+            for key, value in timing.config.items():
+                record[f'{prefix}/timing/{key}'] = value
+
+        return record
+
     def _record_imaging_choice(self, experiment: Experiment, imaging,
                                path: str) -> None:
         """Write how this experiment's frames were timed onto the experiment.
@@ -803,35 +853,32 @@ class Suite2PVxPy(entarchy.Entarchy):
         Without it the entarchy holds data it cannot say how it interpreted. The
         ratio a divided clock is read at is a measurement, and it used to exist
         only in whichever script happened to run the ingest.
+
+        An experiment that already carries a different choice is refused rather
+        than overwritten. An experiment grows over days, and the second run is
+        the one where somebody reaches for the default: that would time the new
+        recordings differently from the ones already in there and replace the
+        record saying so, which is the exact failure this attribute exists to
+        prevent.
         """
+        proposed = self._imaging_record(imaging, path)
+        recorded = {name: experiment[name] for name in experiment.keys()
+                    if name == 'imaging' or name.startswith('imaging/')}
+
+        if len(recorded) > 0 and recorded != proposed:
+            differences = '\n'.join(
+                f'  {name:<40} was {recorded.get(name, "-")!r}, now {proposed.get(name, "-")!r}'
+                for name in sorted(set(recorded) | set(proposed))
+                if recorded.get(name) != proposed.get(name))
+            raise ValueError(
+                f'Experiment "{experiment.id}" was ingested with a different '
+                f'imaging choice, and the {len(experiment.recordings)} recordings '
+                f'already in it were timed that way:\n{differences}\n'
+                f'Pass the same imaging to add to it, or name a new experiment.')
+
         with self:
-            if imaging is None:
-                experiment['imaging'] = 'none'
-                return
-
-            if isinstance(imaging, str) and imaging == 'auto':
-                experiment['imaging'] = 'auto'
-                return
-
-            specs = self._imaging_specs(imaging, path)
-            experiment['imaging'] = ', '.join(spec.name for spec in specs)
-
-            for spec in specs:
-                prefix = f'imaging/{spec.name}'
-                experiment[f'{prefix}/source'] = spec.source.name
-
-                # A per-recording frame_avg_num is a function of the animal and
-                #  recording ids, so there is no one value to record
-                if not callable(spec.frame_avg_num):
-                    experiment[f'{prefix}/frame_avg_num'] = spec.frame_avg_num
-
-                timing = spec._timing
-                if isinstance(timing, FrameTiming):
-                    experiment[f'{prefix}/timing/type'] = type(timing).__name__
-                    for key, value in timing.config.items():
-                        experiment[f'{prefix}/timing/{key}'] = value
-                elif timing is not None:
-                    experiment[f'{prefix}/timing/type'] = str(timing)
+            for name, value in proposed.items():
+                experiment[name] = value
 
     def experiment(self, experiment: Experiment | str) -> Experiment:
         """The Experiment of that name, created if there is none yet.
@@ -1342,16 +1389,38 @@ class Suite2PVxPy(entarchy.Entarchy):
 
     @entarchy.digest_method
     def update_roi_coordinates_from_registration(self, recording_path: str,
-                                                 imaging: str = None):
+                                                 imaging: str = None,
+                                                 experiment: str = None):
         """Refresh ROI coordinates from ANTs registration output.
 
         Registration is computed about an extraction rather than being part of
         one, so it can be re-run and written back afterwards. `imaging` names
         which source's ROIs to update; with one source it can be left out.
+
+        A recording is found by the last two parts of its path, which name the
+        animal and the recording. An animal id is scoped to its experiment, so
+        the same one may exist under two of them - `experiment` says which, and
+        is only needed when it does.
         """
         parts = pathlib.Path(recording_path).as_posix().split('/')
-        recording = self.get(Recording,
-                             f'[Animal]id == "{parts[-2]}" AND id == "{parts[-1]}"')[0]
+        query = f'[Animal]id == "{parts[-2]}" AND id == "{parts[-1]}"'
+        if experiment is not None:
+            query = f'{query} AND [Experiment]id == "{experiment}"'
+
+        found = self.get(Recording, query)
+
+        if len(found) == 0:
+            raise LookupError(f'No recording {parts[-2]}/{parts[-1]} in this '
+                              f'entarchy.')
+
+        if len(found) > 1:
+            names = ', '.join(sorted(r.animal.experiment.id for r in found))
+            raise LookupError(
+                f'{parts[-2]}/{parts[-1]} exists under several experiments '
+                f'({names}), so its path does not say which one to update. '
+                f'Name it with experiment=.')
+
+        recording = found[0]
 
         source_entity = (recording.sole_imaging() if imaging is None
                          else recording.imaging[imaging])
