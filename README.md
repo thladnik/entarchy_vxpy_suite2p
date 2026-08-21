@@ -1,16 +1,60 @@
 ## Entarchy schema for data analysis using vxpy- and suite2p-based data
 
-Defines the entity hierarchy `Animal > Recording > {Layer > Roi, Phase}` on top of
+Defines the entity hierarchy `Experiment > Animal > Recording > {Layer > Roi, Phase}`
+on top of
 [entarchy](https://github.com/thladnik/entarchy), ingests vxpy recordings and
 suite2p output, and implements the contiguous-motion-noise (CMN) receptive field
 analysis in `analysis/cmn`.
 
 ### Ingest
 
+A whole experiment folder goes in with one call:
+
 ```python
-ent = Suite2PVxPy(analysis_path)
-animal = ent.add_animal('/data/animal_01')
-ent.add_recording(animal, '/data/animal_01/rec_01')
+ent = Suite2PVxPy.open_or_create(analysis_path, 'SQLiteBackend',
+                                 {'dbname': 'entarchy.db'})
+ent.add_experiment('/data/cmn')
+```
+
+`add_experiment` expects `<experiment>/<animal>/<recording>` and walks it: a
+folder is a recording if it holds one of the files vxpy writes, and an animal
+if it holds at least one recording, which leaves out `ants_registration` and
+anything else in the tree. `scan_experiment(path)` returns the same reading
+without ingesting anything, for a look before a run that takes hours.
+
+Re-running continues rather than duplicating — animals and recordings that are
+already there are skipped — so an ingest that stopped is resumed by running it
+again. A folder that fails is reported and the run carries on; `skip_broken=False`
+re-raises instead.
+
+The levels are separately available, each taking its parent first:
+
+```python
+animal = ent.add_animal('cmn', '/data/cmn/2024-08-02_fish1')
+ent.add_recording(animal, '/data/cmn/2024-08-02_fish1/rec_01')
+```
+
+**Frame timing is chosen per experiment, and recorded there.** It cannot be
+detected — a rig that recorded no galvo mirror trace has to be timed from a
+divided clock whose ratio was measured by hand — so whatever is passed to
+`add_experiment` is written onto the Experiment under `imaging/`, and the
+entarchy says how it read its own data:
+
+```python
+ent.add_experiment('/data/rot_trans', imaging=ImagingSpec(
+    timing=ClockDivisionTiming(7.5, signal='di_frame_sync')))
+
+experiment['imaging/suite2p/timing/type']             # 'ClockDivisionTiming'
+experiment['imaging/suite2p/timing/edges_per_volume']  # 7.5
+```
+
+An experiment reaches everything below it, and an animal names the experiment
+it belongs to:
+
+```python
+experiment.animals, experiment.recordings, experiment.rois, experiment.phases
+animal.experiment
+ent.get(Roi, '[Experiment]id == "cmn"')
 ```
 
 `add_recording` expects a vxpy recording folder containing `Io.hdf5` (with the
@@ -38,8 +82,8 @@ Each source is an `Imaging` entity under the Recording, named after itself, and
 its layers and ROIs hang off it:
 
 ```
-Animal > Recording > Imaging > Layer > Roi
-                   > Phase
+Experiment > Animal > Recording > Imaging > Layer > Roi
+                                > Phase
 ```
 
 so `plane0` from suite2p and `plane0` from CaImAn are different entities rather

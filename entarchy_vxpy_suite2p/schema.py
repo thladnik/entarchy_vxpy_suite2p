@@ -1,6 +1,8 @@
 from __future__ import annotations
 import os
 import pathlib
+import time
+import traceback
 from typing import Callable, TypeVar, cast, overload
 
 import h5py
@@ -15,17 +17,22 @@ import entarchy
 
 
 __all__ = ['Suite2PVxPy',
-           'Animal', 'Recording', 'Imaging', 'Layer', 'Roi', 'Phase',
-           'AnimalCollection', 'RecordingCollection', 'ImagingCollection',
-           'LayerCollection', 'RoiCollection', 'PhaseCollection',
+           'Experiment', 'Animal', 'Recording', 'Imaging', 'Layer', 'Roi', 'Phase',
+           'ExperimentCollection', 'AnimalCollection', 'RecordingCollection',
+           'ImagingCollection', 'LayerCollection', 'RoiCollection', 'PhaseCollection',
            'ImagingSource', 'Suite2pSource', 'ImagingSpec', 'imaging_sources',
-           'FrameTiming', 'SyncSignalTiming', 'ClockDivisionTiming', 'CameraTiming']
+           'FrameTiming', 'SyncSignalTiming', 'ClockDivisionTiming', 'CameraTiming',
+           'is_recording_folder', 'scan_experiment']
 
 
 # Each names the entity it holds, so that indexing and iterating one gives that
 #  entity rather than the base class - recording.phases[0] is a Phase, and a
 #  Phase's own properties complete. The names are quoted because every
 #  collection here is declared before the entity it holds.
+
+
+class ExperimentCollection(entarchy.Collection['Experiment']):
+    pass
 
 
 class AnimalCollection(entarchy.Collection['Animal']):
@@ -84,8 +91,47 @@ class ImagingCollection(entarchy.Collection['Imaging']):
         return super().__getitem__(item)
 
 
+class Experiment(entarchy.Entity):
+    """One experiment: a set of animals recorded under one protocol.
+
+    The raw tree has always had this level - `<experiment>/<animal>/<recording>`
+    - and the ingest used to flatten it onto a string attribute. Two things
+    make it worth an entity of its own. Which animals belong together is a
+    fact about the data rather than a label, so `[Experiment]id == "cmn"`
+    reads like every other ancestor query here. And how frames were timed is
+    chosen per experiment and cannot be detected, so an Experiment is where
+    that choice is recorded, under `imaging/`.
+    """
+
+    collection_type = ExperimentCollection
+
+    @property
+    def animals(self) -> AnimalCollection:
+        return self.entarchy.get(Animal, f'[Experiment]uuid == "{self.uuid}"')  # type: ignore[return-value]
+
+    @property
+    def recordings(self) -> RecordingCollection:
+        return self.entarchy.get(Recording, f'[Experiment]uuid == "{self.uuid}"')  # type: ignore[return-value]
+
+    @property
+    def phases(self) -> PhaseCollection:
+        return self.entarchy.get(Phase, f'[Experiment]uuid == "{self.uuid}"')  # type: ignore[return-value]
+
+    @property
+    def layers(self) -> LayerCollection:
+        return self.entarchy.get(Layer, f'[Experiment]uuid == "{self.uuid}"')  # type: ignore[return-value]
+
+    @property
+    def rois(self) -> RoiCollection:
+        return self.entarchy.get(Roi, f'[Experiment]uuid == "{self.uuid}"')  # type: ignore[return-value]
+
+
 class Animal(entarchy.Entity):
     collection_type = AnimalCollection
+
+    @property
+    def experiment(self) -> Experiment:
+        return self.parent  # type: ignore[return-value]
 
     @property
     def recordings(self) -> RecordingCollection:
@@ -240,6 +286,7 @@ class Roi(entarchy.Entity):
 
 
 # Establish hierarchy
+Experiment.add_child_entity_type(Animal)
 Animal.add_child_entity_type(Recording)
 Recording.add_child_entity_type(Imaging)
 Imaging.add_child_entity_type(Layer)
@@ -265,6 +312,19 @@ class FrameTiming:
     def frame_times(self, path: str, layer_num: int) -> list:
         """One array of frame times per layer, in acquisition order."""
         raise NotImplementedError
+
+    @property
+    def config(self) -> dict:
+        """What this timing was configured with.
+
+        Frame timing is a choice rather than something readable off the data -
+        the ratio a divided clock is read at was measured by hand - so an
+        ingest writes this onto the Experiment. Every subclass keeps its
+        configuration in plain attributes named after its arguments, which is
+        all this collects.
+        """
+        return {name: value for name, value in vars(self).items()
+                if not name.startswith('_')}
 
 
 class SyncSignalTiming(FrameTiming):
@@ -568,18 +628,248 @@ imaging_sources = {
 }
 
 
+# The files vxpy writes beside one another into a recording folder. Any one of
+#  them is enough to tell a recording from whatever else sits in the tree -
+#  ants_registration, a zstack, a notes file.
+RECORDING_FILE_NAMES = frozenset({'io.hdf5', 'camera.hdf5', 'display.hdf5',
+                                  'gui.hdf5'})
+
+
+def is_recording_folder(path: str) -> bool:
+    """Whether `path` looks like a vxpy recording folder."""
+    if not os.path.isdir(path):
+        return False
+
+    return any(name.lower() in RECORDING_FILE_NAMES for name in os.listdir(path))
+
+
+def scan_experiment(path: str) -> list[tuple[str, list[str]]]:
+    """The animal folders of an experiment folder, and the recordings in each.
+
+    A folder is an animal if it holds at least one recording, which is what
+    leaves out anything else sitting at that level. Reading the tree is separate
+    from ingesting it, so that a caller can see what a run would do before
+    starting one that takes hours:
+
+        for animal_path, recordings in scan_experiment('/data/cmn'):
+            print(os.path.basename(animal_path), len(recordings))
+
+    Returns:
+        list: one (animal_path, [recording_path, ...]) per animal, in name
+            order, holding only animals that have at least one recording.
+    """
+    contents = []
+    for animal_name in sorted(os.listdir(path)):
+        animal_path = os.path.join(path, animal_name)
+        if not os.path.isdir(animal_path):
+            continue
+
+        recordings = [os.path.join(animal_path, name)
+                      for name in sorted(os.listdir(animal_path))
+                      if is_recording_folder(os.path.join(animal_path, name))]
+
+        if len(recordings) > 0:
+            contents.append((animal_path, recordings))
+
+    return contents
+
+
 class Suite2PVxPy(entarchy.Entarchy):
 
     # 0.3 put an Imaging entity between Recording and Layer, so that imaging is
     #  one source among possibly several rather than a property of the recording
-    _implementation_compat_version_list = ['0.3']
-    _implementation_version = '0.3'
+    # 0.4 put an Experiment above Animal, so that which animals belong together
+    #  is a level of the hierarchy rather than a string written on each of them
+    _implementation_compat_version_list = ['0.4']
+    _implementation_version = '0.4'
 
-    _hierarchy_root_type = Animal
+    _hierarchy_root_type = Experiment
+
+    def add_experiment(self, path: str, imaging='auto', name: str = None,
+                       with_video: bool = True, skip_broken: bool = True,
+                       limit: int = None) -> Experiment:
+        """Ingest one experiment folder: `<experiment>/<animal>/<recording>`.
+
+        This is the unit the ingest was missing. `add_animal` and `add_recording`
+        each take one folder, and everything above them - which folders are
+        animals, which of those hold recordings, what to do when one of
+        thirty-eight fails halfway through - was left to whoever wrote the loop.
+
+            ent.add_experiment('/data/cmn')
+            ent.add_experiment('/data/rot_trans', imaging=ImagingSpec(
+                timing=ClockDivisionTiming(7.5, signal='di_frame_sync')))
+
+        The experiment is the right scope for the imaging choice, because that
+        choice cannot be detected and does not vary within one: a rig that
+        recorded no galvo mirror trace has to be timed from a divided clock whose
+        ratio was measured by hand. Whatever is passed here is written onto the
+        Experiment under `imaging/`, so the entarchy records how it read its own
+        data rather than leaving that in the script that happened to run.
+
+        Re-running continues rather than duplicating, since `add_animal` and
+        `add_recording` both skip what is already there. An ingest that stopped
+        is resumed by running it again.
+
+        Args:
+            path: the experiment folder. Its name becomes the experiment id
+                unless `name` says otherwise.
+            imaging: as in `add_recording`, applied to every recording here.
+            with_video: take the behaviour videos in as media.
+            skip_broken: report a folder that fails and carry on rather than
+                ending the run. False re-raises, which is what a test wants.
+            limit: at most this many recordings per animal. A trial run over
+                the whole tree before committing hours to it, since a later
+                full run picks up the rest.
+
+        Returns:
+            Experiment: the experiment, newly created or already present.
+        """
+        path = pathlib.Path(path).as_posix()
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f'No experiment folder {path}')
+
+        if limit is not None and limit < 1:
+            raise ValueError(f'limit is a number of recordings per animal and '
+                             f'is at least one, got {limit}.')
+
+        contents = scan_experiment(path)
+        if limit is not None:
+            contents = [(animal_path, recordings[:limit])
+                        for animal_path, recordings in contents]
+
+        if len(contents) == 0:
+            raise FileNotFoundError(
+                f'{path} holds no animal folder with a vxpy recording in it. An '
+                f'experiment folder is <experiment>/<animal>/<recording>; one '
+                f'animal folder goes to add_animal instead.')
+
+        experiment = self.experiment(os.path.basename(path) if name is None else name)
+        self._record_imaging_choice(experiment, imaging, path)
+
+        total = sum(len(recordings) for _, recordings in contents)
+        print(f'\nIngest experiment {experiment.id} from {path}')
+        print(f'{len(contents)} animals, {total} recordings')
+
+        started = time.time()
+        added, skipped, failed = 0, 0, []
+
+        for animal_path, recording_paths in contents:
+            animal_id = os.path.basename(animal_path)
+            print(f'\n{"#" * 78}\n# {experiment.id} / {animal_id}\n{"#" * 78}')
+
+            try:
+                animal = self.add_animal(experiment, animal_path)
+            except Exception:
+                if not skip_broken:
+                    raise
+                failed.append((animal_path, traceback.format_exc()))
+                print(f'FAILED to add animal {animal_id}:\n{failed[-1][1]}')
+                continue
+
+            for recording_path in recording_paths:
+                done = added + skipped + len(failed)
+                print(f'\n----- {os.path.basename(recording_path)}  '
+                      f'[{done}/{total}, {(time.time() - started) / 60:.0f} min] -----')
+
+                try:
+                    recording = self.add_recording(animal, recording_path,
+                                                   imaging=imaging,
+                                                   with_video=with_video)
+                except Exception:
+                    if not skip_broken:
+                        raise
+                    failed.append((recording_path, traceback.format_exc()))
+                    print(f'FAILED {os.path.basename(recording_path)}:\n{failed[-1][1]}')
+                    continue
+
+                if recording is None:
+                    skipped += 1
+                else:
+                    added += 1
+
+        print(f'\n{"=" * 78}')
+        print(f'{experiment.id}: added {added}, skipped {skipped} already present, '
+              f'{len(failed)} failed, in {(time.time() - started) / 60:.1f} min')
+
+        for failed_path, error in failed:
+            print(f'\n--- {failed_path}\n{error}')
+
+        return experiment
+
+    def _record_imaging_choice(self, experiment: Experiment, imaging,
+                               path: str) -> None:
+        """Write how this experiment's frames were timed onto the experiment.
+
+        Without it the entarchy holds data it cannot say how it interpreted. The
+        ratio a divided clock is read at is a measurement, and it used to exist
+        only in whichever script happened to run the ingest.
+        """
+        with self:
+            if imaging is None:
+                experiment['imaging'] = 'none'
+                return
+
+            if isinstance(imaging, str) and imaging == 'auto':
+                experiment['imaging'] = 'auto'
+                return
+
+            specs = self._imaging_specs(imaging, path)
+            experiment['imaging'] = ', '.join(spec.name for spec in specs)
+
+            for spec in specs:
+                prefix = f'imaging/{spec.name}'
+                experiment[f'{prefix}/source'] = spec.source.name
+
+                # A per-recording frame_avg_num is a function of the animal and
+                #  recording ids, so there is no one value to record
+                if not callable(spec.frame_avg_num):
+                    experiment[f'{prefix}/frame_avg_num'] = spec.frame_avg_num
+
+                timing = spec._timing
+                if isinstance(timing, FrameTiming):
+                    experiment[f'{prefix}/timing/type'] = type(timing).__name__
+                    for key, value in timing.config.items():
+                        experiment[f'{prefix}/timing/{key}'] = value
+                elif timing is not None:
+                    experiment[f'{prefix}/timing/type'] = str(timing)
+
+    def experiment(self, experiment: Experiment | str) -> Experiment:
+        """The Experiment of that name, created if there is none yet.
+
+        Idempotent by id, the way `set_current_analysis` is, so an ingest that
+        runs twice adds animals to the experiment it made the first time rather
+        than to a second one.
+        """
+        if isinstance(experiment, Experiment):
+            return experiment
+
+        if not isinstance(experiment, str):
+            raise TypeError(f'An experiment is named by an Experiment or a '
+                            f'string, not by {type(experiment).__name__}.')
+
+        existing = self.get(Experiment) & f'id == "{experiment}"'
+        if len(existing) > 0:
+            return existing[0]
+
+        with self:
+            print(f'> Create new entity for experiment {experiment}')
+            entity = Experiment(self, _id=experiment, _parent=self.root)
+            self.add_new_entity(entity)
+
+        return entity
 
     @entarchy.digest_method
-    def add_animal(self, path: str, use_anatomy_reference: str = None) -> Animal:
+    def add_animal(self, experiment: Experiment | str, path: str,
+                   use_anatomy_reference: str = None) -> Animal:
+        """Add one animal folder to an experiment.
 
+        The experiment comes first, as the animal does in `add_recording`: an
+        animal belongs to one, and naming it by string creates it if it is new.
+
+            ent.add_animal('cmn', '/data/cmn/2024-08-02_fish1')
+        """
+
+        experiment = self.experiment(experiment)
         path = pathlib.Path(path).as_posix()
 
         print(f'> Add animal from path {path}')
@@ -588,17 +878,21 @@ class Suite2PVxPy(entarchy.Entarchy):
         path_parts = path.split('/')
         animal_id = path_parts[-1]
 
-        animal_collection = (self.get(Animal) & f'id == "{animal_id}"')
+        # Scoped to the experiment, so that the same animal id under two of them
+        #  is two animals rather than a collision
+        animal_collection = self.get(
+            Animal, f'id == "{animal_id}" and [Experiment]uuid == "{experiment.uuid}"')
 
         if len(animal_collection) > 0:
-            print(f'WARNING: recording with id {animal_id} already exists. Skipping.')
+            print(f'WARNING: animal with id {animal_id} already exists in '
+                  f'experiment {experiment.id}. Skipping.')
             return animal_collection[0]
 
         with self:
 
             # Create new animal entity
             print(f'>> Create new entity for animal {animal_id}')
-            animal = Animal(self, _id=animal_id, _parent=self.root)
+            animal = Animal(self, _id=animal_id, _parent=experiment)
             self.add_new_entity(animal)
 
             # Search for zstacks
@@ -996,10 +1290,7 @@ class Suite2PVxPy(entarchy.Entarchy):
             print(f'WARNING: recording with id {recording_id} already exists for animal {animal.id}. Skipping.')
             return None
 
-        # Check if path appears to be a recording path by looking for expected files
-        is_rec_path = any(n in [n1.lower() for n1 in os.listdir(path)]
-                          for n in ['io.hdf5', 'camera.hdf5', 'display.hdf5', 'gui.hdf5'])
-        if not is_rec_path:
+        if not is_recording_folder(path):
             print(f'WARNING: {path} does not appear to be vxpy recording folder. Skipping.')
             return None
 

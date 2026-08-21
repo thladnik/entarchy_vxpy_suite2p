@@ -5,11 +5,14 @@ import numpy as np
 import pytest
 
 from entarchy.backend import SQLiteBackend
-from entarchy_vxpy_suite2p.schema import (Animal, Imaging, ImagingSource, ImagingSpec,
-                                          Layer, Phase, Recording, Roi, Suite2PVxPy,
-                                          imaging_sources)
+from entarchy_vxpy_suite2p.schema import (Animal, Experiment, Imaging, ImagingSource,
+                                          ImagingSpec, Layer, Phase, Recording, Roi,
+                                          Suite2PVxPy, imaging_sources,
+                                          is_recording_folder, scan_experiment)
 
 import _synthetic_data
+
+EXPERIMENT = 'experiment_01'
 
 
 @pytest.fixture()
@@ -27,7 +30,7 @@ def ent(tmp_path):
 
 @pytest.fixture()
 def ingested(ent, dataset):
-    animal = ent.add_animal(dataset['animal_path'])
+    animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
     recording = ent.add_recording(animal, dataset['recording_path'])
     return ent, dataset, animal, recording
 
@@ -35,21 +38,21 @@ def ingested(ent, dataset):
 class TestAddAnimal:
 
     def test_creates_animal_entity(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         assert isinstance(animal, Animal)
         assert animal.id == dataset['animal_id']
         assert len(ent.get(Animal)) == 1
 
     def test_metadata_is_flattened_onto_entity(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         assert animal['metadata/strain'] == 'wildtype'
         assert animal['metadata/age_dpf'] == 6
         assert animal['metadata/nested/dish'] == 3
 
     def test_zstack_is_stored(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         assert animal['zstack_fn'] == 'zstack_1.tif'
         assert np.array_equal(animal['zstack'], dataset['zstack'])
@@ -57,21 +60,202 @@ class TestAddAnimal:
     def test_missing_zstack_is_tolerated(self, tmp_path, ent):
         dataset = _synthetic_data.build_dataset((tmp_path / 'nostack').as_posix(),
                                                 with_zstack=False)
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         assert 'zstack' not in animal
 
     def test_adding_twice_returns_existing_animal(self, ent, dataset, capsys):
-        first = ent.add_animal(dataset['animal_path'])
-        second = ent.add_animal(dataset['animal_path'])
+        first = ent.add_animal(EXPERIMENT, dataset['animal_path'])
+        second = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         assert second.uuid == first.uuid
         assert len(ent.get(Animal)) == 1
         assert 'already exists' in capsys.readouterr().out
 
-    def test_animal_is_child_of_root(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
-        assert animal.parent.uuid == ent.root.uuid
+    def test_animal_is_child_of_its_experiment(self, ent, dataset):
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
+
+        assert isinstance(animal.parent, Experiment)
+        assert animal.experiment.id == EXPERIMENT
+        assert animal.parent.parent.uuid == ent.root.uuid
+
+    def test_the_same_animal_id_under_two_experiments_is_two_animals(self, ent, dataset):
+        """The id is scoped to the experiment, so two protocols may share one."""
+        first = ent.add_animal('experiment_a', dataset['animal_path'])
+        second = ent.add_animal('experiment_b', dataset['animal_path'])
+
+        assert first.uuid != second.uuid
+        assert first.id == second.id
+        assert len(ent.get(Animal)) == 2
+
+
+class TestExperiment:
+
+    def test_named_by_string_creates_one(self, ent):
+        experiment = ent.experiment('cmn')
+
+        assert isinstance(experiment, Experiment)
+        assert experiment.id == 'cmn'
+        assert experiment.parent.uuid == ent.root.uuid
+
+    def test_the_same_name_is_the_same_entity(self, ent):
+        first = ent.experiment('cmn')
+        second = ent.experiment('cmn')
+
+        assert first.uuid == second.uuid
+        assert len(ent.get(Experiment)) == 1
+
+    def test_an_experiment_passes_through(self, ent):
+        experiment = ent.experiment('cmn')
+
+        assert ent.experiment(experiment) is experiment
+
+    def test_anything_else_is_refused(self, ent):
+        with pytest.raises(TypeError, match='named by an Experiment or a string'):
+            ent.experiment(7)
+
+    def test_reaches_everything_below_it(self, ent, dataset):
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
+        ent.add_recording(animal, dataset['recording_path'])
+        experiment = ent.experiment(EXPERIMENT)
+
+        assert len(experiment.animals) == 1
+        assert len(experiment.recordings) == 1
+        assert len(experiment.rois) == len(animal.rois)
+        assert len(experiment.phases) > 0
+
+
+class TestScanExperiment:
+
+    def test_finds_the_animals_and_their_recordings(self, dataset):
+        contents = scan_experiment(dataset['root'])
+
+        assert len(contents) == 1
+        animal_path, recordings = contents[0]
+        assert os.path.basename(animal_path) == dataset['animal_id']
+        assert recordings == [dataset['recording_path']]
+
+    def test_a_folder_without_recordings_is_not_an_animal(self, dataset, tmp_path):
+        """Which is what leaves out whatever else sits at that level."""
+        os.makedirs(os.path.join(dataset['root'], 'notes'), exist_ok=True)
+
+        assert [os.path.basename(a) for a, _ in scan_experiment(dataset['root'])] == [
+            dataset['animal_id']]
+
+    def test_registration_output_beside_a_recording_is_not_one(self, dataset):
+        os.makedirs(os.path.join(dataset['animal_path'], 'ants_registration'),
+                    exist_ok=True)
+
+        _, recordings = scan_experiment(dataset['root'])[0]
+        assert recordings == [dataset['recording_path']]
+
+    def test_is_recording_folder_agrees_with_add_recording(self, dataset, tmp_path):
+        assert is_recording_folder(dataset['recording_path'])
+        assert not is_recording_folder(dataset['animal_path'])
+        assert not is_recording_folder(str(tmp_path / 'does_not_exist'))
+
+
+class TestAddExperiment:
+
+    def test_ingests_the_whole_folder(self, ent, dataset):
+        experiment = ent.add_experiment(dataset['root'], skip_broken=False)
+
+        assert isinstance(experiment, Experiment)
+        assert experiment.id == os.path.basename(dataset['root'])
+        assert len(experiment.animals) == 1
+        assert len(experiment.recordings) == 1
+        assert len(experiment.rois) > 0
+
+    def test_name_overrides_the_folder_name(self, ent, dataset):
+        experiment = ent.add_experiment(dataset['root'], name='cmn', skip_broken=False)
+
+        assert experiment.id == 'cmn'
+
+    def test_running_it_twice_adds_nothing(self, ent, dataset):
+        first = ent.add_experiment(dataset['root'], skip_broken=False)
+        rois = len(first.rois)
+
+        second = ent.add_experiment(dataset['root'], skip_broken=False)
+
+        assert second.uuid == first.uuid
+        assert len(ent.get(Experiment)) == 1
+        assert len(ent.get(Animal)) == 1
+        assert len(ent.get(Recording)) == 1
+        assert len(second.rois) == rois
+
+    def test_a_folder_with_no_animals_is_an_error(self, ent, tmp_path):
+        empty = tmp_path / 'empty_experiment'
+        os.makedirs(empty, exist_ok=True)
+
+        with pytest.raises(FileNotFoundError, match='no animal folder'):
+            ent.add_experiment(empty.as_posix())
+
+    def test_a_missing_folder_is_an_error(self, ent, tmp_path):
+        with pytest.raises(FileNotFoundError, match='No experiment folder'):
+            ent.add_experiment((tmp_path / 'nope').as_posix())
+
+    def test_a_broken_recording_is_reported_rather_than_fatal(self, ent, dataset,
+                                                              monkeypatch):
+        """One bad folder out of thirty-eight must not end the run."""
+        def explode(*args, **kwargs):
+            raise RuntimeError('this recording is broken')
+
+        monkeypatch.setattr(Suite2PVxPy, 'add_recording', explode)
+        experiment = ent.add_experiment(dataset['root'])
+
+        # The animal still went in; only its recording failed
+        assert len(experiment.animals) == 1
+        assert len(experiment.recordings) == 0
+
+    def test_skip_broken_false_re_raises(self, ent, dataset, monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError('this recording is broken')
+
+        monkeypatch.setattr(Suite2PVxPy, 'add_recording', explode)
+
+        with pytest.raises(RuntimeError, match='this recording is broken'):
+            ent.add_experiment(dataset['root'], skip_broken=False)
+
+
+class TestImagingChoiceIsRecorded:
+    """How frames were timed cannot be detected, so it has to be written down."""
+
+    def test_an_explicit_timing_is_stored_on_the_experiment(self, ent, dataset):
+        from entarchy_vxpy_suite2p.schema import ClockDivisionTiming
+
+        spec = ImagingSpec(source='suite2p',
+                           timing=ClockDivisionTiming(7.5, signal='di_frame_sync'))
+        experiment = ent.add_experiment(dataset['root'], imaging=spec)
+
+        assert experiment['imaging'] == 'suite2p'
+        assert experiment['imaging/suite2p/source'] == 'suite2p'
+        assert experiment['imaging/suite2p/timing/type'] == 'ClockDivisionTiming'
+        assert experiment['imaging/suite2p/timing/edges_per_volume'] == 7.5
+        assert experiment['imaging/suite2p/timing/signal'] == 'di_frame_sync'
+
+    def test_auto_says_so(self, ent, dataset):
+        experiment = ent.add_experiment(dataset['root'], imaging='auto')
+
+        assert experiment['imaging'] == 'auto'
+
+    def test_none_says_so(self, ent, dataset):
+        experiment = ent.add_experiment(dataset['root'], imaging=None)
+
+        assert experiment['imaging'] == 'none'
+        assert len(experiment.rois) == 0
+
+    def test_timing_config_covers_every_timing(self):
+        from entarchy_vxpy_suite2p.schema import (CameraTiming, ClockDivisionTiming,
+                                                  SyncSignalTiming)
+
+        assert SyncSignalTiming(method='y_mirror').config == {
+            'method': 'y_mirror', 'signal': 'ai_y_mirror_in',
+            'signal_time': 'ai_y_mirror_in_time', 'frame_avg_num': 1}
+        assert ClockDivisionTiming(7.5).config == {
+            'edges_per_volume': 7.5, 'signal': 'di_frame_sync',
+            'signal_time': 'di_frame_sync_time'}
+        assert CameraTiming('fish_embedded').config == {
+            'device': 'fish_embedded', 'file_name': 'Camera.hdf5'}
 
 
 class TestAddRecording:
@@ -125,7 +309,7 @@ class TestAddRecording:
         assert recording['metadata/experimenter'] == 'tester'
 
     def test_rejects_non_recording_folder(self, ent, dataset, tmp_path, capsys):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         empty = tmp_path / 'not_a_recording'
         empty.mkdir()
 
@@ -253,7 +437,7 @@ class TestConfigurablePhases:
         dataset = _synthetic_data.build_dataset(
             (tmp_path / f'data_{phase_num}').as_posix(), phase_num=phase_num)
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         ent.add_recording(animal, dataset['recording_path'])
 
         assert len(ent.get(Phase)) == phase_num
@@ -264,7 +448,7 @@ class TestConfigurablePhases:
             (tmp_path / 'data_custom').as_posix(),
             phase_windows={0: (3.0, 5.0), 1: (9.0, 13.0), 2: (15.0, 17.0)})
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         ent.add_recording(animal, dataset['recording_path'])
 
         for index, (start, end) in dataset['phase_windows'].items():
@@ -276,7 +460,7 @@ class TestConfigurablePhases:
         dataset = _synthetic_data.build_dataset(
             (tmp_path / 'data_windows').as_posix(), phase_num=5)
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
         frame_times = recording.sole_imaging()['frame_times']
 
@@ -293,7 +477,7 @@ class TestConfigurablePhases:
         dataset = _synthetic_data.build_dataset(
             (tmp_path / 'data_names').as_posix(), phase_num=4)
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         ent.add_recording(animal, dataset['recording_path'])
 
         names = [ent.get(Phase, f'index == {i}')[0]['display/__visual_name']
@@ -305,7 +489,7 @@ class TestConfigurablePhases:
             (tmp_path / 'data_looming').as_posix(), phase_num=2,
             visual_names=['Looming'])
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         ent.add_recording(animal, dataset['recording_path'])
 
         assert {p['display/__visual_name'] for p in ent.get(Phase)} == {'Looming'}
@@ -417,7 +601,7 @@ class TestLayersAndRois:
             os.remove(os.path.join(dataset['recording_path'], 'suite2p',
                                    f'plane{plane}', 'iscell.npy'))
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         ent.add_recording(animal, dataset['recording_path'])
 
         roi = ent.get(Roi)[0]
@@ -495,7 +679,7 @@ class TestUnequalPlaneFrameCounts:
         dataset = _synthetic_data.build_dataset((tmp_path / 'uneven').as_posix(),
                                                 frames_per_plane=[60, 40])
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
 
         # frame_times is assigned after the layer loop, so it reflects plane1
@@ -552,7 +736,7 @@ class TestBehaviourVideo:
         assert recording['camera/tail_pose_data'].shape == (400, 9, 3)
 
     def test_with_video_false_skips_it(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'], with_video=False)
 
         assert recording.media() == []
@@ -561,7 +745,7 @@ class TestBehaviourVideo:
     def test_a_declared_device_without_a_file_warns(self, tmp_path, ent, capsys):
         dataset = _synthetic_data.build_dataset((tmp_path / 'novideo').as_posix(),
                                                 with_video=False)
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
 
         assert 'has no video file' in capsys.readouterr().out
@@ -570,7 +754,7 @@ class TestBehaviourVideo:
     def test_a_recording_without_a_camera_file_is_fine(self, tmp_path, ent):
         dataset = _synthetic_data.build_dataset((tmp_path / 'nocamera').as_posix(),
                                                 with_camera=False)
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
 
         assert recording.media() == []
@@ -583,7 +767,7 @@ class TestBehaviourVideo:
         with open(stray, 'wb') as f:
             f.write(b'not an acquisition')
 
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
 
         assert recording.media() == ['camera/fish_embedded/video']
@@ -597,7 +781,7 @@ class TestRecordingWithoutImaging:
     def behaviour_only(self, tmp_path, ent):
         dataset = _synthetic_data.build_dataset((tmp_path / 'behaviour').as_posix(),
                                                 with_suite2p=False)
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
         return ent, dataset, recording
 
@@ -663,7 +847,7 @@ class TestImagingSelection:
         assert len(recording.layers) > 0
 
     def test_none_skips_imaging_that_is_there(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
 
         assert recording['has_imaging'] is False
@@ -673,13 +857,13 @@ class TestImagingSelection:
     def test_suite2p_requires_it(self, tmp_path, ent):
         dataset = _synthetic_data.build_dataset((tmp_path / 'none').as_posix(),
                                                 with_suite2p=False)
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         with pytest.raises(FileNotFoundError, match='found no data'):
             ent.add_recording(animal, dataset['recording_path'], imaging='suite2p')
 
     def test_an_unknown_source_is_refused(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         with pytest.raises(ValueError, match='Unknown imaging source'):
             ent.add_recording(animal, dataset['recording_path'], imaging='caiman')
@@ -689,7 +873,7 @@ class TestImagingSelection:
         not a recording to ingest quietly."""
         dataset = _synthetic_data.build_dataset((tmp_path / 'noio').as_posix())
         os.remove(os.path.join(dataset['recording_path'], 'Io.hdf5'))
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         with pytest.raises(FileNotFoundError, match='no Io.hdf5'):
             ent.add_recording(animal, dataset['recording_path'])
@@ -773,7 +957,7 @@ class BrokenSource(FakeSource):
 
 
 def _two_sources(ent, dataset):
-    animal = ent.add_animal(dataset['animal_path'])
+    animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
     return ent.add_recording(
         animal, dataset['recording_path'],
         imaging=['suite2p', ImagingSpec(source=FakeSource(), name='fake')])
@@ -833,7 +1017,7 @@ class TestSeveralSources:
 class TestAddImagingLater:
 
     def test_a_source_can_be_added_after_ingest(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
         assert len(recording.imaging) == 0
 
@@ -845,7 +1029,7 @@ class TestAddImagingLater:
         assert recording['has_imaging'] is True
 
     def test_phase_windows_are_linked_for_a_later_source(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
 
         imaging = ent.add_imaging(recording, 'suite2p', path=dataset['recording_path'])
@@ -854,7 +1038,7 @@ class TestAddImagingLater:
             assert phase.frames_in(imaging) is not None
 
     def test_a_second_source_can_be_added_later(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
 
         ent.add_imaging(recording, FakeSource(), path=dataset['recording_path'],
@@ -863,7 +1047,7 @@ class TestAddImagingLater:
         assert sorted(source.id for source in recording.imaging) == ['fake', 'suite2p']
 
     def test_a_duplicate_name_is_refused(self, ent, dataset):
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'])
 
         with pytest.raises(ValueError, match='already has an imaging source'):
@@ -871,7 +1055,7 @@ class TestAddImagingLater:
 
     def test_the_path_must_be_given(self, ent, dataset):
         """An entarchy is self-contained; it does not keep a path it can read."""
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
         recording = ent.add_recording(animal, dataset['recording_path'], imaging=None)
 
         with pytest.raises(ValueError, match='needs the recording folder'):
@@ -883,7 +1067,7 @@ class TestSourceContract:
     def test_a_source_that_breaks_the_contract_is_caught(self, ent, dataset):
         """The check has to run after a commit, or it inspects an empty
         collection and passes - which is what it did when first written."""
-        animal = ent.add_animal(dataset['animal_path'])
+        animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
 
         with pytest.raises(RuntimeError, match=r"without \['fluorescence'\]"):
             ent.add_recording(animal, dataset['recording_path'],

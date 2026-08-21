@@ -11,6 +11,8 @@ from entarchy_vxpy_suite2p.schema import Roi, Suite2PVxPy
 
 import _synthetic_data
 
+EXPERIMENT = 'experiment_01'
+
 
 @pytest.fixture()
 def ingested(tmp_path):
@@ -18,7 +20,7 @@ def ingested(tmp_path):
     ent = Suite2PVxPy.create(base, SQLiteBackend(base, dbname='analysis.db'))
 
     dataset = _synthetic_data.build_dataset((tmp_path / 'data').as_posix())
-    animal = ent.add_animal(dataset['animal_path'])
+    animal = ent.add_animal(EXPERIMENT, dataset['animal_path'])
     ent.add_recording(animal, dataset['recording_path'])
 
     yield ent

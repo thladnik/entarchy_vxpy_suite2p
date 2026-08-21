@@ -8,7 +8,8 @@ import h5py
 
 import entarchy
 from entarchy_vxpy_suite2p import schema
-from entarchy_vxpy_suite2p.schema import (Animal, ClockDivisionTiming, Imaging, Layer,
+from entarchy_vxpy_suite2p.schema import (Animal, ClockDivisionTiming, Experiment,
+                                          Imaging, Layer,
                                           Phase, Recording, Roi, Suite2PVxPy,
                                           ca_frame_times_from_sync_toggle,
                                           ca_frame_times_from_y_mirror,
@@ -20,12 +21,14 @@ class TestHierarchyDeclaration:
     def test_resolved_hierarchy(self):
         hierarchy, entity_map = Suite2PVxPy._resolve_hierarchy()
 
-        assert hierarchy['Animal'] == {
-            'Recording': {'Imaging': {'Layer': {'Roi': {}}}, 'Phase': {}}}
-        for name in ('Animal', 'Recording', 'Imaging', 'Layer', 'Roi', 'Phase'):
+        assert hierarchy['Experiment'] == {'Animal': {
+            'Recording': {'Imaging': {'Layer': {'Roi': {}}}, 'Phase': {}}}}
+        for name in ('Experiment', 'Animal', 'Recording', 'Imaging', 'Layer',
+                     'Roi', 'Phase'):
             assert name in entity_map
 
     def test_child_entity_types(self):
+        assert Experiment.get_child_entity_types() == [Animal]
         assert Animal.get_child_entity_types() == [Recording]
         assert Recording.get_child_entity_types() == [Imaging, Phase]
         assert Imaging.get_child_entity_types() == [Layer]
@@ -33,9 +36,12 @@ class TestHierarchyDeclaration:
         assert Roi.get_child_entity_types() is None
 
     def test_collection_types_are_registered(self):
-        from entarchy_vxpy_suite2p.schema import (AnimalCollection, ImagingCollection,
+        from entarchy_vxpy_suite2p.schema import (AnimalCollection,
+                                                  ExperimentCollection,
+                                                  ImagingCollection,
                                                   LayerCollection, PhaseCollection,
                                                   RecordingCollection, RoiCollection)
+        assert Experiment.get_collection_type() is ExperimentCollection
         assert Animal.get_collection_type() is AnimalCollection
         assert Recording.get_collection_type() is RecordingCollection
         assert Layer.get_collection_type() is LayerCollection
